@@ -20,6 +20,10 @@ to every stack. Per-stack patterns follow.
    one case per row, edge cases as rows, not as separate test functions.
 5. **Migrations never rewrite history.** Forward-only, additive migrations. Data backfills are
    separate slices from schema changes when the backfill is non-trivial.
+6. **Design for at-least-once execution.** Anything that can be re-run — backfills, background
+   jobs, endpoints under client retry — must be idempotent: running it twice leaves the same
+   state as running it once. Guard writes with existence checks or natural keys, not with
+   "this will only be called once" hope.
 
 ## Go
 
@@ -38,7 +42,9 @@ to every stack. Per-stack patterns follow.
 
 - Additive `ALTER TABLE ... ADD COLUMN` with a default or `NULL`; never drop or retyped in
   the same migration that adds.
-- Backfill with `UPDATE ... WHERE <condition>` in batches for large tables.
+- Backfill with `UPDATE ... WHERE <condition>` in batches for large tables, guarded so
+  re-running is safe (`WHERE NOT EXISTS (...)` or an idempotent key). Batch with a keyed
+  cursor (`WHERE id > :cursor`), never `OFFSET`.
 - New indexes created concurrently (`CREATE INDEX CONCURRENTLY`) when the table is large.
 
 ## Python

@@ -41,13 +41,23 @@ python3 <skill-dir>/scripts/check_slice.py ready .specs/<feature>/03-plan.md <n>
 This verifies every `depends-on` slice's branch (`slice/<feature>-<k>`) is merged into the
 base branch. If not ready, report "slice <n> blocked on slice <k>" and stop.
 
-## Step 3 — Create your worktree
+## Step 3 — Create (or resume) your worktree
 
 ```bash
 git fetch origin <base>
 git worktree add ../<repo>-<feature>-slice-<n> -b slice/<feature>-<n> origin/<base>
 cd ../<repo>-<feature>-slice-<n>
 ```
+
+**This step must be re-runnable.** If a previous attempt crashed, the worktree or branch
+may already exist — resume it, never duplicate or destroy it:
+
+- Branch `slice/<feature>-<n>` exists but no worktree: re-attach with
+  `git worktree add ../<repo>-<feature>-slice-<n> slice/<feature>-<n>`.
+- Worktree already exists: `cd` into it, run `git status` and `git log --oneline
+  <base>..HEAD` to see where the attempt stopped, and continue from there.
+- Only if the prior attempt's committed work is wrong, reset deliberately
+  (`git reset --hard origin/<base>`) and say so in your report — never silently.
 
 Branch naming is a contract: `slice/<feature>-<n>`. The readiness gate for downstream slices
 depends on it. Verify you are in a linked worktree (`git rev-parse --git-dir` differs from

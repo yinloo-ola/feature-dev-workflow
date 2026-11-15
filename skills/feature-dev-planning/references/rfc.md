@@ -37,7 +37,9 @@
      or human answer:
    - Scope: what's explicitly in, explicitly out, and deferred
    - Happy-path flows, end to end
-   - Edge cases: empty/zero/boundary values, concurrent access, partial failure, rollback
+   - Edge cases: empty/zero/boundary values, concurrent access, partial failure, rollback,
+     and re-execution (retries, duplicate delivery, re-run migrations/backfills — what
+     happens when the same operation runs twice?)
    - Scale and limits: expected volumes, growth, hot paths
    - Data model and migrations: schema changes, backfills, reversibility
    - Observability: how success and failure are detected in production
