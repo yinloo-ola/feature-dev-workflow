@@ -16,6 +16,29 @@ discover them, don't invent them:
    touched. Fast feedback while iterating.
 4. **Full suite** — the entire test suite, before the PR. Every slice is independently
    green; "green once my sibling slices land" is a plan defect, not an excuse.
+5. **Prove the behaviors** — demonstrate each Behavior your card cites by exercising the
+   real artifact, not a proxy.
+
+## Prove the behaviors
+
+A green suite is evidence, not proof. Before the PR, show the behaviors working:
+
+- **The strongest proof is scripted.** A table-driven test whose rows map to the card's
+  cited Behavior entries is a re-runnable proof — cite it (file + row names) in the PR.
+- **What tests can't reach gets demonstrated.** Integration points, real IO, runtime
+  behavior: run the real thing (start the server and curl it, execute the CLI with real
+  input, query the actual table) and capture the **actual output** into the PR.
+- **Never substitute a proxy** — "it compiles", "the suite is green", or your own summary
+  of what happened. The reviewer re-runs your commands or your tests instead of trusting
+  your word; that is the bar.
+- **If a demonstration fails while tests pass**, suspect the observation method first
+  (wrong port, stale build, wrong environment), then the system. Either way: report it —
+  never tune the demo until it looks right.
+
+Proof scales with the card automatically: a card citing two Behaviors owes two proofs,
+small or scripted. If proving a behavior honestly is impossible in your environment
+ (no database available, no deploy target), say so explicitly in the PR — an honest
+ "unproven, here's why" beats a fabricated demonstration.
 
 ## Rules
 

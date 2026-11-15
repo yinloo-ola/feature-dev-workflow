@@ -101,8 +101,9 @@ and why that's safe for its caller.
 Observable outcomes, one line each: given <precondition>, when <action>,
 then <observable result>. Include failure and re-execution rows (e.g.
 "given the webhook was already processed, when it is redelivered, then
-no duplicate side effect"). These become acceptance criteria in slice
-cards and rows in table-driven tests.
+no duplicate side effect"). These are **proof obligations**: each entry cited by a slice
+card is demonstrated in that slice's PR — by a test that maps to it, or by running the
+real thing with the output shown (see slice-executor's verification reference).
 
 ## Alternatives considered
 Brief. One alternative if necessary — one you would defend, not a strawman —

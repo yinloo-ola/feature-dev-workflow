@@ -104,8 +104,8 @@ base and ask you to continue:
 ## Step 5 — Verify
 
 Run the full verification loop from [references/verification.md](references/verification.md)
-(build → lint → targeted tests → full suite, using the repo's own commands), then commit any
-remaining changes and run the mechanical gates:
+(build → lint → targeted tests → full suite → prove the behaviors, using the repo's own
+commands), then commit any remaining changes and run the mechanical gates:
 
 ```bash
 python3 <skill-dir>/scripts/check_slice.py verify .specs/<feature>/03-plan.md <n>
@@ -123,8 +123,9 @@ edit the plan to make the gate pass.
 Push your branch and open a PR:
 
 - Title: `[slice <n>] <card title>`
-- Body: the card's goal and acceptance criteria (copy from the card), what was tested, and
-  the one reviewable decision this PR makes.
+- Body: the card's goal and acceptance criteria (copy from the card), **proof** — for each
+  Behavior the card cites, either the command and its actual output, or the test that maps
+  to it (file + row names) — what was tested, and the one reviewable decision this PR makes.
 - Base: the plan's base branch.
 
 Report back: PR link, slice number, gate output, and anything the orchestrator should know
