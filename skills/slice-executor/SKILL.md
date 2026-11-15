@@ -32,6 +32,10 @@ Read, in order:
 If the card fails the cold-start test — you would need to ask a question to proceed —
 report exactly what's missing and stop. That's a plan defect, not your problem to fix.
 
+If you were dispatched without an assignment (self-claim mode), claim your slice atomically
+before starting: `mkdir .specs/<feature>/claims/slice-<n>` — if it already exists, another
+agent has it; move to the next unclaimed slice.
+
 ## Step 2 — Pre-flight: readiness
 
 From the main checkout (or any checkout of the repo), run:
@@ -41,7 +45,9 @@ python3 <skill-dir>/scripts/check_slice.py ready .specs/<feature>/03-plan.md <n>
 ```
 
 This verifies every `depends-on` slice's branch (`slice/<feature>-<k>`) is merged into the
-base branch. If not ready, report "slice <n> blocked on slice <k>" and stop.
+base branch. If not ready, report "slice <n> blocked on slice <k>" and stop. If a dependency
+branch is missing entirely (e.g. after a fresh clone), the merge can't be verified from git —
+report it and let the orchestrator confirm the merge before you proceed.
 
 ## Step 3 — Create (or resume) your worktree
 
@@ -83,8 +89,9 @@ python3 <skill-dir>/scripts/check_slice.py verify .specs/<feature>/03-plan.md <n
 ```
 
 The gates check, against the base branch: scope (only declared `files` + `tests` changed),
-size (≤350 changed lines excluding lockfiles/generated code), mode (an `additive` slice
-deletes almost nothing), and tests (declared test files actually changed). Fix failures by
+size (≤350 changed lines excluding lockfiles/generated code), mode (additive and migrate
+slices delete almost nothing — only contract slices may delete), and tests (declared test
+files actually changed). Fix failures by
 changing your code or (if the gate exposed a genuine plan defect) report and stop — never
 edit the plan to make the gate pass.
 

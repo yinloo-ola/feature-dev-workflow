@@ -161,11 +161,11 @@ def cmd_verify(plan_path, n):
         errors.append(f"size: {size} changed lines (cap {SIZE_CAP}, excluding "
                       "lockfiles/generated) — split the slice or trim the diff")
 
-    # mode gate
-    if card["mode"] == "additive" and dels_non_test > ADDITIVE_DEL_CAP:
-        errors.append(f"mode: additive slice deletes {dels_non_test} lines outside test "
-                      f"files (cap {ADDITIVE_DEL_CAP}) — additive means additions; "
-                      "deletions belong to the contract slice")
+    # mode gate: only contract slices may delete (additive and migrate are capped)
+    if card["mode"] in ("additive", "migrate") and dels_non_test > ADDITIVE_DEL_CAP:
+        errors.append(f"mode: {card['mode']} slice deletes {dels_non_test} lines outside test "
+                      f"files (cap {ADDITIVE_DEL_CAP}) — only contract slices may delete; "
+                      "deletions belong to the final contract slice")
 
     # test gate: declared test files must be in the diff; "tests: none" (declared)
     # is honored, an undeclared/empty tests field on a behavior change is not

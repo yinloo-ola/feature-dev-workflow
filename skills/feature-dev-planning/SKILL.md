@@ -27,7 +27,8 @@ Read [references/rfc.md](references/rfc.md) for the full procedure and the RFC t
 1. Audit the codebase first: find the modules, tables, and conventions the PRD touches. The RFC
    must describe the change against the *actual* code, not a generic architecture.
 2. Interrogate the PRD until nothing material is unknown: requirements, flows, edge cases,
-   failure modes, scale, and alternative designs. Exhaust the codebase audit and sensible
+   failure modes, and scale; alternative designs where the choice is non-obvious. Exhaust the
+   codebase audit and sensible
    defaults first; ask the human only what genuinely remains, in batched rounds where every
    question carries a proposed default. Full protocol: [references/rfc.md](references/rfc.md).
 3. Draft `02-rfc.md` using the template in the reference.
@@ -62,8 +63,9 @@ Write `03-plan.md`, then run:
 python3 <skill-dir>/scripts/plan_lint.py .specs/<feature>/03-plan.md
 ```
 
-The linter enforces: required card fields, file overlap without a dependency edge, dependency
-cycles, and that slice 1 is additive. Fix failures in the plan — never waive the linter. For
+The linter enforces: required card fields, the `Base branch:` header, file overlap without a
+dependency edge, backward-only dependencies (which makes cycles structurally impossible), and
+that slice 1 is additive. Fix failures in the plan — never waive the linter. For
 idioms to follow in cards (additive-first, one path per behavior, test-covered,
 at-least-once execution), read [references/idioms.md](references/idioms.md).
 
@@ -79,7 +81,9 @@ After `03-plan.md` lints clean and the foundation slice (slice 1) has landed on 
   two agents in the same checkout — on a branch named `slice/<feature>-<n>`. The branch name is
   a contract: downstream readiness checks depend on it.
 - After each slice's PR merges, rebase the remaining worktrees onto the updated base branch and
-  have each re-run its verification before continuing.
+  have each re-run its verification before continuing. **Never delete slice branches after
+  merge** — local `slice/<feature>-<n>` branches are the merge record that downstream readiness
+  checks depend on (remote deletion by GitHub is fine; the local branch is what's checked).
 - If an executor reports a card as ambiguous or blocking: fix the card in `03-plan.md`, re-run
   `plan_lint.py`, then re-dispatch. Never resolve ambiguity with verbal instructions to one
   agent — parallel agents won't hear them, and the plan stops matching the code.

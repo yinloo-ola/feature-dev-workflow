@@ -21,6 +21,8 @@ REQUIRED = ("mode", "depends-on", "files", "tests", "card")
 
 def parse_plan(text: str):
     """Return {num: {title, mode, deps, files, tests, card}} preserving order."""
+    if not re.search(r"^Base branch:\s*\S+", text, re.M):
+        raise ValueError("missing 'Base branch:' header — slice-executor requires it")
     slices, current = {}, None
     field = None
     for line in text.splitlines():
