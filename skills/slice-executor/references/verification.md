@@ -20,8 +20,9 @@ discover them, don't invent them:
 ## Rules
 
 - If the full suite fails on tests unrelated to your slice, confirm the failure exists on
-  the base branch too (`git stash`-free check: run the suite on the base worktree or note
-  it in the PR). Pre-existing failures get reported in the PR, not fixed by you — fixing
+  the base branch too — run the suite in another checkout at base (the main checkout your
+  worktree was created from, or a temporary `git worktree add` at `origin/<base>`), or
+  note it in the PR. Pre-existing failures get reported in the PR, not fixed by you — fixing
   them is out of your slice's scope and the scope gate will reject it.
 - No skips, no `t.Skip`, no commented-out assertions, no weakened test to make it pass.
   If a test you wrote can't pass, the card's assumptions are wrong — report and stop.

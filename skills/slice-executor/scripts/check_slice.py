@@ -41,11 +41,13 @@ def git(*args):
 
 
 def parse_plan(path):
-    """Return (base_branch, {num: card}) where card = dict(mode, deps, files, tests)."""
+    """Return (base_branch, feature, {num: card}) where card = dict(mode, deps, files, tests)."""
     text = Path(path).read_text()
     base = re.search(r"^Base branch:\s*(\S+)", text, re.M)
     if not base:
         fail([f"{path}: missing 'Base branch:' header"])
+    m = re.search(r"^# Plan:\s*(\S+)", text, re.M)
+    feature = m.group(1) if m else Path(path).resolve().parent.name
     slices, current, field = {}, None, None
     for line in text.splitlines():
         m = SLICE_RE.match(line)
@@ -70,14 +72,14 @@ def parse_plan(path):
             continue
         if line.startswith("  - ") and field in ("files", "tests"):
             slices[current][field].append(line[4:].strip())
-    return base.group(1), slices
+    return base.group(1), feature, slices
 
 
 def get_card(plan_path, n):
-    base, slices = parse_plan(plan_path)
+    base, feature, slices = parse_plan(plan_path)
     if n not in slices:
         fail([f"slice {n} not found in {plan_path}"])
-    return base, slices[n], slices
+    return base, slices[n], feature
 
 
 def is_excluded(path):
@@ -91,11 +93,10 @@ def is_testfile(path, tests):
 
 
 def cmd_ready(plan_path, n):
-    base, card, _ = get_card(plan_path, n)
+    base, card, feature = get_card(plan_path, n)
     if not card["deps"]:
         print(f"OK: slice {n} has no dependencies — ready.")
         return
-    feature = Path(plan_path).resolve().parent.name
     blocked = []
     for dep in card["deps"]:
         branch = f"slice/{feature}-{dep}"
@@ -113,9 +114,12 @@ def cmd_ready(plan_path, n):
 
 
 def cmd_verify(plan_path, n):
-    base, card, _ = get_card(plan_path, n)
-    feature = Path(plan_path).resolve().parent.name
+    base, card, feature = get_card(plan_path, n)
     branch = f"slice/{feature}-{n}"
+
+    if card["mode"] not in MODES:
+        fail([f"slice {n}: mode {card['mode']!r} is not one of {sorted(MODES)} — "
+              "fix the plan (a typo'd mode must never silently skip the gates)"])
 
     # working tree must be clean (gates evaluate committed diff)
     rc, out = git("status", "--porcelain")

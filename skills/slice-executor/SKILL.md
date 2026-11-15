@@ -63,7 +63,10 @@ cd ../<repo>-<feature>-slice-<n>
 ```
 
 **This step must be re-runnable.** If a previous attempt crashed, the worktree or branch
-may already exist — resume it, never duplicate or destroy it:
+may already exist — resume it, never duplicate or destroy it. On any resume, **re-read your
+slice card first**: if the orchestrator fixed it since the crashed attempt, reconcile your
+work with the new card before continuing — continuing from a stale understanding is worse
+than starting over.
 
 - Branch `slice/<feature>-<n>` exists but no worktree: re-attach with
   `git worktree add ../<repo>-<feature>-slice-<n> slice/<feature>-<n>`.
@@ -82,6 +85,21 @@ Implement exactly what the card says, following the principles in [references/id
 and the concrete stack patterns recorded in the RFC's Design section. Behavior changes ship with
 tests in the same diff (table-driven where the input space is combinatorial). Commit in small
 steps if you like; the gates below evaluate the full branch diff against the base.
+
+## If rebased mid-flight
+
+When another slice's PR merges, the orchestrator may rebase your worktree onto the updated
+base and ask you to continue:
+
+1. **Re-read your slice card.** If the orchestrator changed it, reconcile your work with the
+   new card before continuing — discard work the new card no longer wants, and say so in
+   your report.
+2. **Re-run the full verification loop.** Your slice must be green against the *new* base,
+   not the one you started from.
+3. **Re-run `check_slice.py verify`.** Scope is still judged against the base branch; a
+   rebase must not widen your diff beyond the card's declared files.
+4. If rebase conflicts force edits outside your card's declared files, report and stop —
+   never widen your own scope to make a merge fit.
 
 ## Step 5 — Verify
 

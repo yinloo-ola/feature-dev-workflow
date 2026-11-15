@@ -138,7 +138,8 @@ def main():
             print(f"  - {e}")
         return 1
     parallel = [n for n, s in slices.items() if not (s["deps"] or []) and n != 1]
-    print(f"OK: {path} — {len(slices)} slices; parallelizable immediately: "
+    n_label = f"{len(slices)} slice" + ("" if len(slices) == 1 else "s")
+    print(f"OK: {path} — {n_label}; parallelizable immediately: "
           f"{sorted(parallel) if parallel else 'none (all sequenced)'}")
     return 0
 

@@ -82,7 +82,8 @@ After `03-plan.md` lints clean and the foundation slice (slice 1) has landed on 
   two agents into the same checkout. Agents work on branches named `slice/<feature>-<n>` —
   the branch name is a contract: downstream readiness checks depend on it.
 - After each slice's PR merges, rebase the remaining worktrees onto the updated base branch and
-  have each re-run its verification before continuing. **Never delete slice branches after
+  have each re-run its verification before continuing (slice-executor documents the
+  mid-flight rebase procedure for the agents). **Never delete slice branches after
   merge** — local `slice/<feature>-<n>` branches are the merge record that downstream readiness
   checks depend on (remote deletion by GitHub is fine; the local branch is what's checked).
 - If an executor reports a card as ambiguous or blocking: fix the card in `03-plan.md`, re-run
