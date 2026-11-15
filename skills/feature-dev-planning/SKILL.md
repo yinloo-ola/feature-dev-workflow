@@ -77,9 +77,10 @@ After `03-plan.md` lints clean and the foundation slice (slice 1) has landed on 
   slice. Assignment needs no locking.
 - Only assign slices whose `depends-on` targets are all merged. Re-evaluate after each merge.
 - Spawn one sub-agent per ready slice, each instructed to run the `slice-executor` skill against
-  `.specs/<feature>/` and its slice number. Each agent works in its **own git worktree** — never
-  two agents in the same checkout — on a branch named `slice/<feature>-<n>`. The branch name is
-  a contract: downstream readiness checks depend on it.
+  `.specs/<feature>/` and its slice number. You may pre-create worktrees and spawn agents inside
+  them, or let each executor create its own — its Step 3 handles both. Either way, never spawn
+  two agents into the same checkout. Agents work on branches named `slice/<feature>-<n>` —
+  the branch name is a contract: downstream readiness checks depend on it.
 - After each slice's PR merges, rebase the remaining worktrees onto the updated base branch and
   have each re-run its verification before continuing. **Never delete slice branches after
   merge** — local `slice/<feature>-<n>` branches are the merge record that downstream readiness

@@ -11,8 +11,10 @@ You have no conversation history and need none; the slice card is your complete 
 
 **Hard rules:**
 
-- Work **only in your own git worktree**, never in a shared checkout. Two agents in the same
-  checkout is a build-breaking race.
+- **Never write code in a shared checkout.** Before implementing, verify you are in an
+  isolated git worktree — whether the orchestrator dispatched you into one or you must
+  create it yourself (Step 3 handles both). Two agents in the same checkout is a
+  build-breaking race, and this check is your defense against sloppy dispatch.
 - Never merge your own PR. You open it; a human reviews and merges.
 - Never touch files outside your card's `files` + `tests` — the verify gate rejects it anyway.
 - If blocked (missing dependency, ambiguous card, failing gate you can't satisfy honestly),
@@ -49,7 +51,10 @@ base branch. If not ready, report "slice <n> blocked on slice <k>" and stop. If 
 branch is missing entirely (e.g. after a fresh clone), the merge can't be verified from git —
 report it and let the orchestrator confirm the merge before you proceed.
 
-## Step 3 — Create (or resume) your worktree
+## Step 3 — Enter (or create, or resume) your worktree
+
+First check: if you are already in a linked worktree on branch `slice/<feature>-<n>`
+(the orchestrator pre-created it), proceed to Step 4. Otherwise create yours:
 
 ```bash
 git fetch origin <base>
