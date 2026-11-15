@@ -9,8 +9,10 @@
 2. **Audit the codebase.** Before writing a single design line, establish:
    - The modules, packages, and files the feature touches (by search, not assumption).
    - Existing schemas/migrations and the migration conventions (tool, naming, direction).
-   - Existing patterns for the closest analogous feature already in the repo — the RFC extends
-   the codebase's real conventions, never invents parallel ones.
+   - Existing patterns for the closest analogous feature already in the repo. They are the
+   default to extend — not a mandate. A better pattern may be chosen when the RFC records
+   the deviation and its reason. The audit's job is to find them either way: you cannot
+   decide to deviate from a pattern you never knew existed.
    - Anything the PRD assumes exists but doesn't.
 
 3. **Interrogate the PRD.** Interrogate until nothing *material* is unknown — an RFC drafted
@@ -86,9 +88,10 @@ audit, not from the PRD's assumptions.
 ## Design
 The chosen approach. For each significant change: what is added, what is
 extended, what is eventually removed. Include schema/API sketches where
-concrete. Follow the principles in references/idioms.md, and record the repo-derived
-concrete patterns here (naming, error-handling style, test framework, migration style)
-so the executor implements the repo's way instead of guessing. State the
+concrete. Follow the principles in references/idioms.md, and record the chosen
+concrete patterns here (naming, error-handling style, test framework, migration
+style) so the executor implements them instead of guessing — repo-derived by
+default, or a recorded deviation with its reason. State the
 re-execution semantics of every write path (endpoints under client retry,
 webhooks, jobs, backfills): idempotent — by what key or guard — or at-most-once
 and why that's safe for its caller.
@@ -137,9 +140,9 @@ Rules for the template:
   the contradiction before Phase 2 — not during execution.
 - `Staging` is the bridge to Phase 2: each stage that can stand alone becomes one or more
   slices; stages that can't stand alone are sequencing constraints, not parallel work.
-- `Stack` is mandatory, and `Design` must carry the stack patterns derived from the repo's
-closest analogous code. A missing stack pin or a pattern-free Design leaves the executor
-guessing — an RFC defect.
+- `Stack` is mandatory, and `Design` must carry the concrete patterns — repo-derived from
+the closest analogous code, or a recorded deviation with its reason. A missing stack pin
+or a pattern-free Design leaves the executor guessing — an RFC defect.
 - **Coverage is the proof the interrogation happened.** Every checklist item appears with a
   disposition pointing at its answer (PRD section, assumption number, or default). An item
   marked "considered" with no pointer is a defect — a traceless process didn't happen.

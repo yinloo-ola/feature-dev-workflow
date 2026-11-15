@@ -8,13 +8,17 @@ repo and recorded in the RFC's Design section (see the planning skill's RFC refe
 
 When guidance conflicts, resolve in this order:
 
-1. **Repo convention** — the closest analogous code already in the repo wins.
-2. **These principles** — where the repo is silent.
-3. **Agent preference** — never. Where 1 and 2 are both silent, the RFC records an
+1. **A recorded RFC decision** — a deliberate deviation from repo convention, with its
+   reason written in the RFC, overrides everything below. Improving on a bad pattern is
+   allowed; doing it silently is not.
+2. **Repo convention** — the default, where the repo speaks and no recorded decision says
+   otherwise.
+3. **These principles** — where the repo is silent.
+4. **Agent preference** — never. Where everything above is silent, the RFC records an
    assumption instead of an agent silently choosing.
 
-A principle that contradicts repo convention loses, and the conflict is recorded in the
-RFC's Design section so it's a visible decision, not a silent one.
+Unrecorded deviation is the defect to watch for: code that departs from repo convention
+without the RFC saying so is an agent silently choosing — reviewers see it as noise.
 
 ## Principles
 
