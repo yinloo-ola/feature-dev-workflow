@@ -72,7 +72,7 @@
 ```markdown
 # RFC: <feature>
 
-- Stack: <language / framework / datastore — pins which idioms apply>
+- Stack: <language / framework / datastore — pins the concrete patterns derived below>
 - Status: draft | approved
 - PRD: [01-prd.md](01-prd.md)
 
@@ -86,7 +86,9 @@ audit, not from the PRD's assumptions.
 ## Design
 The chosen approach. For each significant change: what is added, what is
 extended, what is eventually removed. Include schema/API sketches where
-concrete. Link idioms from references/idioms.md that apply. State the
+concrete. Follow the principles in references/idioms.md, and record the repo-derived
+concrete patterns here (naming, error-handling style, test framework, migration style)
+so the executor implements the repo's way instead of guessing. State the
 re-execution semantics of every write path (endpoints under client retry,
 webhooks, jobs, backfills): idempotent — by what key or guard — or at-most-once
 and why that's safe for its caller.
@@ -135,8 +137,9 @@ Rules for the template:
   the contradiction before Phase 2 — not during execution.
 - `Staging` is the bridge to Phase 2: each stage that can stand alone becomes one or more
   slices; stages that can't stand alone are sequencing constraints, not parallel work.
-- `Stack` is mandatory. The executor reads it to select idioms; a missing stack pin is an
-  RFC defect.
+- `Stack` is mandatory, and `Design` must carry the stack patterns derived from the repo's
+closest analogous code (see idioms' *Deriving stack patterns*). A missing stack pin or a
+pattern-free Design leaves the executor guessing — an RFC defect.
 - **Coverage is the proof the interrogation happened.** Every checklist item appears with a
   disposition pointing at its answer (PRD section, assumption number, or default). An item
   marked "considered" with no pointer is a defect — a traceless process didn't happen.

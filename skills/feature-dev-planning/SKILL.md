@@ -31,8 +31,13 @@ Read [references/rfc.md](references/rfc.md) for the full procedure and the RFC t
    defaults first; ask the human only what genuinely remains, in batched rounds where every
    question carries a proposed default. Full protocol: [references/rfc.md](references/rfc.md).
 3. Draft `02-rfc.md` using the template in the reference. The RFC must pin the stack
-   (language, framework, datastore) — the executor loads idioms from that pin.
+   (language, framework, datastore) — the Design section records the repo-derived patterns
+   for that stack, and the executor implements what it records.
 4. Present the RFC and stop. Wait for user approval.
+
+   The RFC must pin the stack (language, framework, datastore) and derive its concrete
+   patterns from the repo's closest analogous code — the executor implements what the RFC
+   records, so a pattern-free Design is an RFC defect.
 
 ## Phase 2 — RFC → Slice plan
 
@@ -59,8 +64,8 @@ python3 <skill-dir>/scripts/plan_lint.py .specs/<feature>/03-plan.md
 
 The linter enforces: required card fields, file overlap without a dependency edge, dependency
 cycles, and that slice 1 is additive. Fix failures in the plan — never waive the linter. For
-idioms to reference in cards (additive SQL, explicit columns, table-driven tests, etc.), read
-[references/idioms.md](references/idioms.md).
+idioms to follow in cards (additive-first, one path per behavior, test-covered,
+at-least-once execution), read [references/idioms.md](references/idioms.md).
 
 ## Fan-out — handoff to slice-executor
 

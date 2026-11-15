@@ -26,7 +26,7 @@ Read, in order:
 
 1. The full slice card for your number, plus the plan header (base branch, stack).
 2. The RFC sections the card points to (`02-rfc.md`, same directory).
-3. The idioms for the pinned stack: [references/idioms.md](references/idioms.md).
+3. The engineering principles: [references/idioms.md](references/idioms.md).
 4. The verification loop: [references/verification.md](references/verification.md).
 
 If the card fails the cold-start test — you would need to ask a question to proceed —
@@ -67,7 +67,8 @@ depends on it. Verify you are in a linked worktree (`git rev-parse --git-dir` di
 
 ## Step 4 — Implement
 
-Implement exactly what the card says, following the stack idioms. Behavior changes ship with
+Implement exactly what the card says, following the principles in [references/idioms.md](references/idioms.md)
+and the concrete stack patterns recorded in the RFC's Design section. Behavior changes ship with
 tests in the same diff (table-driven where the input space is combinatorial). Commit in small
 steps if you like; the gates below evaluate the full branch diff against the base.
 
