@@ -1,6 +1,7 @@
-# pi-software-dev
+# feature-dev-workflow
 
-Skills for AI-assisted software development.
+Skills for AI-assisted feature development: plan a PRD into parallel-safe, reviewable PR
+slices, then execute each slice in isolation.
 
 ## Skills
 
