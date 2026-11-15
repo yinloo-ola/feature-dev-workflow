@@ -37,9 +37,12 @@
      or human answer:
    - Scope: what's explicitly in, explicitly out, and deferred
    - Happy-path flows, end to end
-   - Edge cases: empty/zero/boundary values, concurrent access, partial failure, rollback,
-     and re-execution (retries, duplicate delivery, re-run migrations/backfills — what
-     happens when the same operation runs twice?)
+   - Edge cases: empty/zero/boundary values, concurrent access, partial failure, rollback
+   - Idempotency and re-execution: which operations can run more than once (client retries,
+     duplicate delivery, worker restarts, re-run migrations/backfills), and is each safe to
+     re-run? Every write path gets an explicit answer: idempotent by natural key, guarded by
+     an existence check or dedup — or explicitly documented as at-most-once with the caller
+     contract that implies
    - Scale and limits: expected volumes, growth, hot paths
    - Data model and migrations: schema changes, backfills, reversibility
    - Observability: how success and failure are detected in production
@@ -78,7 +81,10 @@ audit, not from the PRD's assumptions.
 ## Design
 The chosen approach. For each significant change: what is added, what is
 extended, what is eventually removed. Include schema/API sketches where
-concrete. Link idioms from references/idioms.md that apply.
+concrete. Link idioms from references/idioms.md that apply. State the
+re-execution semantics of every write path (endpoints under client retry,
+webhooks, jobs, backfills): idempotent — by what key or guard — or at-most-once
+and why that's safe for its caller.
 
 ## Alternatives considered
 Brief. One alternative minimum, with the reason it lost.
