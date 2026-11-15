@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feature Dev Planning"
+  short_description: "PRD to RFC to parallel-safe PR slices"
+  default_prompt: "Use $feature-dev-planning to turn this PRD into an RFC and a sliced PR plan in .specs/."

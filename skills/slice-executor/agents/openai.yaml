@@ -1,0 +1,4 @@
+interface:
+  display_name: "Slice Executor"
+  short_description: "Execute one planned slice in its own worktree"
+  default_prompt: "Use $slice-executor to implement slice 3 of .specs/payments/03-plan.md."
