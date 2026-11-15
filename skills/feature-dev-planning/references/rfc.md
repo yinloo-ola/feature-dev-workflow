@@ -53,8 +53,11 @@
    in spirit: the design should be shippable in stages, each stage leaving the system working.
 
 5. **Present and stop.** Show the user the RFC path, the assumptions taken, and the open
-   questions. If open questions remain, they are the agenda for the approval conversation.
-   Do not begin Phase 2 until the user approves.
+   questions — they are the agenda for the approval conversation. Approval requires **zero
+   open questions**: each must be answered, or the user explicitly accepts its default and it
+   is promoted to an assumption (recorded as such). "Approved, defaults fine" is a valid,
+   complete approval; approving while questions remain unanswered is not. Do not begin
+   Phase 2 until approval is complete.
 
 ## RFC template
 

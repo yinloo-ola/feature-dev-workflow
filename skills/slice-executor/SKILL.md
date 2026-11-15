@@ -16,7 +16,9 @@ You have no conversation history and need none; the slice card is your complete 
 - Never merge your own PR. You open it; a human reviews and merges.
 - Never touch files outside your card's `files` + `tests` — the verify gate rejects it anyway.
 - If blocked (missing dependency, ambiguous card, failing gate you can't satisfy honestly),
-  report the blocker and stop. Do not silently reinterpret the card.
+  report the blocker and stop. Do not silently reinterpret the card, and do not guess to
+  keep moving — a wrong guess costs a re-slice and a broken parallel build; a stop costs
+  minutes.
 
 ## Step 1 — Read the contract
 

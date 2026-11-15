@@ -21,13 +21,17 @@ Stack: <pinned from 02-rfc.md>
 - tests:
   - internal/payments/processor_test.go
 - card: |
-    <Self-contained description. Goal, approach, acceptance criteria,
-    and pointers to the exact 02-rfc.md sections that matter.>
+    <Self-contained description: goal, approach, exact identifiers/signatures/data shapes,
+    error behavior, and an acceptance-criteria checklist the executor treats as its
+    definition of done. Pointers to the exact 02-rfc.md sections that matter.>
 
 ### Slice 2: ...
 ```
 
 Field rules (enforced by `plan_lint.py`):
+
+Structural rules are enforced mechanically by the linter; the zero-ambiguity rule below is
+procedural — enforced by the cold-start test and by slice-executor's stop-and-report rule.
 
 - `mode`: `additive` (no deletions of existing behavior), `migrate`, or `contract`
   (deletions/cleanup). Slice 1 must be `additive`. Only `contract` slices may delete.
@@ -55,6 +59,10 @@ Field rules (enforced by `plan_lint.py`):
 6. **Cold-start test.** Before writing the plan off, read each card as if you've never seen the
    feature. If a competent dev would need to ask a question to ship it, the card is incomplete —
    fold the answer in.
+7. **Zero ambiguity.** If two competent developers could implement a card differently, the
+   card is ambiguous — a plan defect. Pin everything interpretive in the card: exact
+   identifiers, signatures/routes, data shapes, error behavior, and acceptance criteria.
+   "Sensible" is not a spec.
 
 ## Slicing procedure
 

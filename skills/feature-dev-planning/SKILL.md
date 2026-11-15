@@ -16,8 +16,9 @@ you where you are. No other progress tracking exists or is needed.
 └── 03-plan.md   # the slice checklist — the contract for slice-executor
 ```
 
-Never start Phase 2 before the user approves the RFC. Never fan out before PR 1 (the foundation)
-has landed on the base branch.
+Never start Phase 2 before the user approves the RFC — and approval is only valid with
+**zero open questions**: each one answered, or explicitly accepted as an assumption by the
+user. Never fan out before PR 1 (the foundation) has landed on the base branch.
 
 ## Phase 1 — PRD → RFC
 
@@ -74,6 +75,9 @@ After `03-plan.md` lints clean and the foundation slice (slice 1) has landed on 
   a contract: downstream readiness checks depend on it.
 - After each slice's PR merges, rebase the remaining worktrees onto the updated base branch and
   have each re-run its verification before continuing.
+- If an executor reports a card as ambiguous or blocking: fix the card in `03-plan.md`, re-run
+  `plan_lint.py`, then re-dispatch. Never resolve ambiguity with verbal instructions to one
+  agent — parallel agents won't hear them, and the plan stops matching the code.
 
 Fallback if agents must self-claim (e.g., user fires off independent sessions): the cheapest
 atomic lock is `mkdir .specs/<feature>/claims/slice-<n>` — exactly one agent succeeds; all
