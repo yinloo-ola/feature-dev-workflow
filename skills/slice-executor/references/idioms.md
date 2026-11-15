@@ -4,8 +4,7 @@
 
 Process-level principles every slice follows, regardless of stack. Concrete language and
 database patterns are deliberately **not** listed here — they are derived from the target
-repo (see *Deriving stack patterns*) so they never compete with the codebase's own
-conventions.
+repo and recorded in the RFC's Design section (see the planning skill's RFC reference).
 
 ## Precedence
 
@@ -44,17 +43,3 @@ RFC's Design section so it's a visible decision, not a silent one.
    signal (structured logs with context, metrics on outcome) that success and failure are
    distinguishable in production without reproducing them locally. The RFC's observability
    coverage item is implemented here.
-
-## Deriving stack patterns
-
-Concrete patterns — naming, error-handling style, test framework and structure, migration
-style — come from the repo, not from this file:
-
-- At planning time, derive them from the closest analogous feature (found in the codebase
-  audit) and record them in the RFC's Design section. The executor implements what is
-  written there; it does not guess and does not import generic language fashion.
-- House rules that apply across a team's repos belong in each repo's `AGENTS.md` /
-  `CLAUDE.md`, versioned next to the code they govern — not in this skill, which travels
-  to repos those rules would contradict.
-- When the repo is genuinely inconsistent (two competing patterns for the same thing),
-  pick the one the RFC can defend and record the choice as an assumption.

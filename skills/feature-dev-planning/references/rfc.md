@@ -138,8 +138,8 @@ Rules for the template:
 - `Staging` is the bridge to Phase 2: each stage that can stand alone becomes one or more
   slices; stages that can't stand alone are sequencing constraints, not parallel work.
 - `Stack` is mandatory, and `Design` must carry the stack patterns derived from the repo's
-closest analogous code (see idioms' *Deriving stack patterns*). A missing stack pin or a
-pattern-free Design leaves the executor guessing — an RFC defect.
+closest analogous code. A missing stack pin or a pattern-free Design leaves the executor
+guessing — an RFC defect.
 - **Coverage is the proof the interrogation happened.** Every checklist item appears with a
   disposition pointing at its answer (PRD section, assumption number, or default). An item
   marked "considered" with no pointer is a defect — a traceless process didn't happen.
