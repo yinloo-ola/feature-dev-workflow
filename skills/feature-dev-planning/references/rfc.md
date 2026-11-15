@@ -46,7 +46,12 @@
    - Scale and limits: expected volumes, growth, hot paths
    - Data model and migrations: schema changes, backfills, reversibility
    - Observability: how success and failure are detected in production
+   - Security and access: who may call or see each new path, what data is exposed,
+     PII handling — depth proportional to the surface the feature adds
    - Alternatives: at least two designs considered, one recommended with reasons
+
+   Each checklist item's disposition (answered where, assumed as what, defaulted how)
+   is recorded in the RFC's `## Coverage` section — the checklist leaves a trace.
 
    **Stop condition:** the RFC may be drafted when no remaining unknown is *both*
    unresolvable by audit or default *and* material to the design. Everything unasked or
@@ -86,16 +91,39 @@ re-execution semantics of every write path (endpoints under client retry,
 webhooks, jobs, backfills): idempotent — by what key or guard — or at-most-once
 and why that's safe for its caller.
 
+## Behaviors
+Observable outcomes, one line each: given <precondition>, when <action>,
+then <observable result>. Include failure and re-execution rows (e.g.
+"given the webhook was already processed, when it is redelivered, then
+no duplicate side effect"). These become acceptance criteria in slice
+cards and rows in table-driven tests.
+
 ## Alternatives considered
-Brief. One alternative minimum, with the reason it lost.
+Brief. One alternative minimum — one you would defend, not a strawman —
+with the reason it lost.
 
 ## Staging
 How the change ships in stages (expand → migrate → contract), each stage
 leaving the system working. This feeds Phase 2 slicing.
 
 ## Assumptions and open questions
-- Assumption: <what was adopted and why it's safe> 
+- Assumption: <what was adopted and why it's safe>
 - [ ] Open: <question> — <why it matters / default if unanswered>
+
+## Coverage
+One line per interrogation checklist item, each with a disposition:
+- Scope: <answered — PRD §n | assumed — see assumptions #n | defaulted — ...>
+- Edge cases: ...
+- Idempotency and re-execution: ...
+- Scale and limits: ...
+- Data model and migrations: ...
+- Observability: ...
+- Security and access: ...
+- Alternatives: see Alternatives considered
+
+## Change log
+Append-only. Every post-approval design change: date, what changed,
+why, and re-approved (yes/no).
 ```
 
 Rules for the template:
@@ -109,3 +137,15 @@ Rules for the template:
   slices; stages that can't stand alone are sequencing constraints, not parallel work.
 - `Stack` is mandatory. The executor reads it to select idioms; a missing stack pin is an
   RFC defect.
+- **Coverage is the proof the interrogation happened.** Every checklist item appears with a
+  disposition pointing at its answer (PRD section, assumption number, or default). An item
+  marked "considered" with no pointer is a defect — a traceless process didn't happen.
+- **Behaviors must be testable as written.** If you cannot phrase the `then`, the design
+  isn't concrete yet — go back to Design. Slice cards cite the Behaviors entries they
+  implement; their table-driven tests map rows to those entries, so vague behaviors here
+  become vague tests downstream.
+- **Amendments never rewrite history.** After approval, the RFC changes only by appending
+  to `## Change log`. A **material amendment** — changing a behavior, altering the data
+  model, reordering staging — requires user re-approval before affected slices are dispatched
+  again. Clarifications that change no behavior need no re-approval. Already-merged slices
+  are facts: amend forward (a new slice), never retro-fit merged code to a new design.

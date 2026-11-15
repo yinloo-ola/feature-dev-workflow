@@ -22,8 +22,9 @@ Stack: <pinned from 02-rfc.md>
   - internal/payments/processor_test.go
 - card: |
     <Self-contained description: goal, approach, exact identifiers/signatures/data shapes,
-    error behavior, and an acceptance-criteria checklist the executor treats as its
-    definition of done. Pointers to the exact 02-rfc.md sections that matter.>
+    error behavior, and an acceptance-criteria checklist citing the RFC `## Behaviors`
+    entries this slice implements (table-driven test rows map 1:1 to those entries).
+    Pointers to the exact 02-rfc.md sections that matter.>
 
 ### Slice 2: ...
 ```
