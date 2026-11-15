@@ -10,7 +10,7 @@ complete on its own.
 # Plan: <feature>
 
 Base branch: main
-Stack: <pinned from 02-rfc.md>
+Stack: <from 02-rfc.md, only when stated — polyglot/greenfield cases>
 
 ### Slice 1: <imperative title, one reviewable decision>
 - mode: additive

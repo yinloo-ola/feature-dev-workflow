@@ -50,7 +50,7 @@
    - Observability: how success and failure are detected in production
    - Security and access: who may call or see each new path, what data is exposed,
      PII handling — depth proportional to the surface the feature adds
-   - Alternatives: at least two designs considered, one recommended with reasons
+   - Alternatives: if necessary, consider two designs, one recommended with reasons
 
    Each checklist item's disposition (answered where, assumed as what, defaulted how)
    is recorded in the RFC's `## Coverage` section — the checklist leaves a trace.
@@ -74,7 +74,8 @@
 ```markdown
 # RFC: <feature>
 
-- Stack: <language / framework / datastore — pins the concrete patterns derived below>
+- Stack: <only when not obvious from the repo — polyglot monorepo, greenfield, or a new
+  service; otherwise omit, the executor works inside the repo and sees the real thing>
 - Status: draft | approved
 - PRD: [01-prd.md](01-prd.md)
 
@@ -104,7 +105,7 @@ no duplicate side effect"). These become acceptance criteria in slice
 cards and rows in table-driven tests.
 
 ## Alternatives considered
-Brief. One alternative minimum — one you would defend, not a strawman —
+Brief. One alternative if necessary — one you would defend, not a strawman —
 with the reason it lost.
 
 ## Staging
@@ -140,9 +141,11 @@ Rules for the template:
   the contradiction before Phase 2 — not during execution.
 - `Staging` is the bridge to Phase 2: each stage that can stand alone becomes one or more
   slices; stages that can't stand alone are sequencing constraints, not parallel work.
-- `Stack` is mandatory, and `Design` must carry the concrete patterns — repo-derived from
-the closest analogous code, or a recorded deviation with its reason. A missing stack pin
-or a pattern-free Design leaves the executor guessing — an RFC defect.
+- The stack needs no pin in an established repo — it's a fact of the target code, and the
+  executor works inside it. State it explicitly only when the repo is polyglot or greenfield
+  and the Design's file paths don't make the choice obvious. `Design` must still carry the
+  concrete patterns — repo-derived from the closest analogous code, or a recorded deviation
+  with its reason. A pattern-free Design leaves the executor guessing — an RFC defect.
 - **Coverage is the proof the interrogation happened.** Every checklist item appears with a
   disposition pointing at its answer (PRD section, assumption number, or default). An item
   marked "considered" with no pointer is a defect — a traceless process didn't happen.

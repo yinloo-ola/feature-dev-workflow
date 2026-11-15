@@ -24,7 +24,7 @@ You have no conversation history and need none; the slice card is your complete 
 
 Read, in order:
 
-1. The full slice card for your number, plus the plan header (base branch, stack).
+1. The full slice card for your number, plus the plan header (base branch).
 2. The RFC sections the card points to (`02-rfc.md`, same directory).
 3. The engineering principles: [references/idioms.md](references/idioms.md).
 4. The verification loop: [references/verification.md](references/verification.md).

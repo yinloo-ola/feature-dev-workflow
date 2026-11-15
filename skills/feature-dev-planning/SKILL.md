@@ -30,14 +30,14 @@ Read [references/rfc.md](references/rfc.md) for the full procedure and the RFC t
    failure modes, scale, and alternative designs. Exhaust the codebase audit and sensible
    defaults first; ask the human only what genuinely remains, in batched rounds where every
    question carries a proposed default. Full protocol: [references/rfc.md](references/rfc.md).
-3. Draft `02-rfc.md` using the template in the reference. The RFC must pin the stack
-   (language, framework, datastore) — the Design section records the repo-derived patterns
-   for that stack, and the executor implements what it records.
+3. Draft `02-rfc.md` using the template in the reference.
 4. Present the RFC and stop. Wait for user approval.
 
-   The RFC must pin the stack (language, framework, datastore) and derive its concrete
-   patterns from the repo's closest analogous code — the executor implements what the RFC
-   records, so a pattern-free Design is an RFC defect.
+   The Design section must record the concrete patterns derived from the repo's closest
+   analogous code — or a recorded deviation with its reason. The executor implements what
+   the RFC records, so a pattern-free Design is an RFC defect. The stack itself needs no
+   pin in an established repo (the executor works inside it); state it only when the repo
+   is polyglot or greenfield and the choice isn't obvious.
 
 ## Phase 2 — RFC → Slice plan
 
