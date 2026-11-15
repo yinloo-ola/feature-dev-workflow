@@ -13,17 +13,46 @@
    the codebase's real conventions, never invents parallel ones.
    - Anything the PRD assumes exists but doesn't.
 
-3. **Interrogate the PRD.** Choose at most 5 questions, asked in one batched message, covering:
-   edge cases the PRD is silent on, expected scale/limits, failure and rollback expectations,
-   and anything that contradicts what you found in the audit. Everything else becomes an
-   `## Open questions` entry in the RFC. Do not ask more than 5; do not hold a multi-round
-   interview.
+3. **Interrogate the PRD.** Interrogate until nothing *material* is unknown — an RFC drafted
+   over unresolved requirements, edge cases, or flows is a confident document that is wrong.
+   But interrogation has an order of cost; exhaust each source before moving to the next:
+
+   1. **The codebase.** How does the repo handle this today? What does the closest analogous
+      feature do? Many "questions" are answerable by reading code — never ask a human what
+      the audit can tell you.
+   2. **Sensible defaults.** For each remaining unknown, is there an industry-standard or
+      repo-consistent default? If yes, adopt it and record it as an assumption.
+   3. **The human.** Only what survives steps 1–2: unknowns where the answer would change
+      the design and no safe default exists.
+
+   When asking the human:
+   - **Batch into rounds.** One message per round, questions grouped by theme (scope, edge
+     cases, data model, …). Never drip-feed single questions.
+   - **Every question carries a proposed default.** The user can answer selectively or just
+     say "defaults are fine" — unanswered questions never block progress.
+   - **Materiality filter.** Ask only what could change the design. Curiosities become
+     recorded assumptions, not questions.
+
+   Before drafting, run the **coverage checklist** — every item resolved by audit, default,
+     or human answer:
+   - Scope: what's explicitly in, explicitly out, and deferred
+   - Happy-path flows, end to end
+   - Edge cases: empty/zero/boundary values, concurrent access, partial failure, rollback
+   - Scale and limits: expected volumes, growth, hot paths
+   - Data model and migrations: schema changes, backfills, reversibility
+   - Observability: how success and failure are detected in production
+   - Alternatives: at least two designs considered, one recommended with reasons
+
+   **Stop condition:** the RFC may be drafted when no remaining unknown is *both*
+   unresolvable by audit or default *and* material to the design. Everything unasked or
+   unanswered lands in `## Assumptions and open questions` with its default.
 
 4. **Draft the RFC** as `.specs/<feature>/02-rfc.md` using the template below. Keep it additive
    in spirit: the design should be shippable in stages, each stage leaving the system working.
 
-5. **Present and stop.** Show the user the RFC path and the open questions. Do not begin Phase 2
-   until the user approves.
+5. **Present and stop.** Show the user the RFC path, the assumptions taken, and the open
+   questions. If open questions remain, they are the agenda for the approval conversation.
+   Do not begin Phase 2 until the user approves.
 
 ## RFC template
 
@@ -53,14 +82,18 @@ Brief. One alternative minimum, with the reason it lost.
 How the change ships in stages (expand → migrate → contract), each stage
 leaving the system working. This feeds Phase 2 slicing.
 
-## Open questions
-- [ ] <question> — <why it matters / default if unanswered>
+## Assumptions and open questions
+- Assumption: <what was adopted and why it's safe> 
+- [ ] Open: <question> — <why it matters / default if unanswered>
 ```
 
 Rules for the template:
 
-- Every open question carries a **default answer**. Unanswered questions must not block
-  slicing; the default is used and noted in the plan.
+- Every assumption and open question carries a **default answer**. Unanswered questions must
+  not block slicing; the default is used and noted in the plan.
+- Assumptions are the audit- and default-resolved unknowns; open questions are the ones put
+  to the user. If an open question's answer arrives and contradicts an assumption, resolve
+  the contradiction before Phase 2 — not during execution.
 - `Staging` is the bridge to Phase 2: each stage that can stand alone becomes one or more
   slices; stages that can't stand alone are sequencing constraints, not parallel work.
 - `Stack` is mandatory. The executor reads it to select idioms; a missing stack pin is an

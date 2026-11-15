@@ -25,9 +25,10 @@ Read [references/rfc.md](references/rfc.md) for the full procedure and the RFC t
 
 1. Audit the codebase first: find the modules, tables, and conventions the PRD touches. The RFC
    must describe the change against the *actual* code, not a generic architecture.
-2. Interrogate the PRD: at most **5 questions, batched in one message**, covering edge cases,
-   scale, and failure modes. Everything else goes into the RFC's `## Open questions` section for
-   the user to answer asynchronously. Never run a long interview.
+2. Interrogate the PRD until nothing material is unknown: requirements, flows, edge cases,
+   failure modes, scale, and alternative designs. Exhaust the codebase audit and sensible
+   defaults first; ask the human only what genuinely remains, in batched rounds where every
+   question carries a proposed default. Full protocol: [references/rfc.md](references/rfc.md).
 3. Draft `02-rfc.md` using the template in the reference. The RFC must pin the stack
    (language, framework, datastore) — the executor loads idioms from that pin.
 4. Present the RFC and stop. Wait for user approval.
