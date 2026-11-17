@@ -7,17 +7,24 @@ Enforces the contract between feature-dev-planning and slice-executor:
   - deletes-existing is 'no' or 'yes — <what and why>'; mode: is legacy, advisory
   - depends-on references exist and the graph is acyclic
   - parallel slices (no edge between them) declare disjoint file sets
+  - WARN (never fail): plan shape (fan-out ratio, longest chain) and card identifiers
+    that appear in test files the card does not declare
 
 Usage: plan_lint.py <path-to-03-plan.md>
 Exit 0 = plan is valid. Exit 1 = failures (printed).
 """
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 SLICE_RE = re.compile(r"^### Slice (\d+):(.*)$")
 DELIVER_RE = re.compile(r"^deliver:\s*(parallel|stacked)$", re.M)
 DELETES_RE = re.compile(r"^yes\s*—\s*(\S.*)$")  # captures the reason text
+TEST_RE = re.compile(r"(_test\.(go|py|rs)|\.test\.(ts|tsx|js|mjs)|\.spec\.(ts|tsx))$")
+SKIP_DIRS = {"vendor", "node_modules", "dist", "build", "generated"}
+IDENT_RE = re.compile(r"`([^`\s]{4,})`")
+GREP_CAP = 200
 REQUIRED = ("mode", "depends-on", "files", "tests", "card")
 
 
@@ -26,6 +33,49 @@ def parse_deliver(text: str) -> str:
     m = DELIVER_RE.search(text)
     return m.group(1) if m else "parallel"
 
+
+def shape(slices):
+    """(fan-out ratio or None, longest chain as card numbers). Slice 1 is the foundation:
+    excluded as a node, and a dependency on it does not count."""
+    eff = {n: [d for d in s["deps"] or [] if d != 1] for n, s in slices.items() if n != 1}
+    chain = {}  # n -> longest chain ending at n (earlier slices only: deps are validated)
+    for n in sorted(eff):
+        chain[n] = max(([chain[d] for d in eff[n] if d in chain] or [[]]), key=len) + [n]
+    longest = max(chain.values(), key=len, default=[])
+    roots = sum(1 for d in eff.values() if not d)
+    return (roots / len(eff) if eff else None), longest
+
+def undeclared_test_warnings(plan_dir, slices):
+    """(warnings, note). Cards' backticked identifiers vs test files the card doesn't declare."""
+    try:
+        root = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=plan_dir,
+                              capture_output=True, text=True, check=True).stdout.strip()
+        files = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=root,
+                               capture_output=True, text=True, check=True).stdout.splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        return [], "identifier grep skipped (not a git repo)"
+    tests = {}  # path -> text, read once
+    for f in files:
+        if TEST_RE.search(f) and not SKIP_DIRS & set(f.split("/")):
+            try:
+                tests[f] = (Path(root) / f).read_text(errors="ignore")
+            except OSError:
+                pass
+    warns, greps = [], 0
+    for num, s in sorted(slices.items()):
+        declared = set(s["files"]) | set(s["tests"])
+        for ident in dict.fromkeys(IDENT_RE.findall(" ".join(s["card"]))):
+            if "/" in ident:
+                continue
+            if greps >= GREP_CAP:
+                return warns, f"identifier grep capped at {GREP_CAP}"
+            greps += 1  # one search of the test corpus per identifier
+            pat = re.compile(r"(?<!\w)" + re.escape(ident) + r"(?!\w)")
+            hit = next((f for f, t in tests.items() if f not in declared and pat.search(t)), None)
+            if hit:
+                warns.append(f"slice {num}: identifier {ident} appears in undeclared test file "
+                             f"{hit} — add {hit} to tests or note the required update")
+    return warns, ""
 
 def parse_plan(text: str):
     """Return {num: {title, mode, deps, files, tests, card}} preserving order."""
@@ -150,6 +200,19 @@ def main():
                     "without a dependency edge — add 'depends-on' or re-slice"
                 )
 
+    ratio, chain, note = None, [], ""
+    if not errors:
+        ratio, chain = shape(slices)
+        order = " → ".join(map(str, chain))
+        if deliver == "stacked":
+            if chain:
+                print(f"chain order: {order}")
+        elif ratio is not None and (ratio < 0.3 or len(chain) > 5):
+            warnings.append(f"pipeline, not parallel plan (fan-out {ratio:.0%}, longest chain "
+                            f"{len(chain)}) — collapse sequential cards or declare deliver: "
+                            f"stacked (chain: {order})")
+        w, note = undeclared_test_warnings(path.resolve().parent, slices)
+        warnings += w
     for w in warnings:
         print(f"WARN: {w}")
     if errors:
@@ -162,7 +225,9 @@ def main():
     n_del = sum(1 for s in slices.values() if s["reason"])
     print(f"OK: {path} — {n_label}; deliver: {deliver}; "
           f"deletes-existing: {n_del}; parallelizable immediately: "
-          f"{sorted(parallel) if parallel else 'none (all sequenced)'}")
+          f"{sorted(parallel) if parallel else 'none (all sequenced)'}; "
+          f"fan-out {'n/a' if ratio is None else format(ratio, '.0%')}, longest chain {len(chain)}"
+          + (f"; {note}" if note else ""))
     return 0
 
 
