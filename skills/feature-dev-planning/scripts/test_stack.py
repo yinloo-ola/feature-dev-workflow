@@ -89,9 +89,9 @@ class StackTest(unittest.TestCase):
         self.assertIn("edges must point to earlier", err)
 
     def test_mutating_command_writes_state_with_captured_shas(self):
-        code, _, err = self.run_stack("push")
-        self.assertEqual(code, 1)  # push itself is not implemented yet
-        self.assertIn("not implemented yet", err)
+        code, out, _ = self.run_stack("restack", "--from", "3")  # slice 3 has no branch
+        self.assertEqual(code, 0)
+        self.assertIn("restack complete", out)
         state = json.loads(self.state.read_text())
         self.assertEqual(state.pop("created_at")[:2], "20")
         self.assertEqual(state, {
@@ -103,12 +103,12 @@ class StackTest(unittest.TestCase):
                 "2": {"orig_sha": self.sha[2], "remote_sha": None},
                 "3": {"orig_sha": None, "remote_sha": None},
             },
-            "position": {"next_branch": "slice/feat-1", "applied": []},
+            "position": {"next_branch": None, "applied": []},
         })
         # A second run must not overwrite the recorded original SHAs.
         g("commit", "-q", "--allow-empty", "-m", "moved")
         g("branch", "-f", "slice/feat-2", "HEAD")
-        self.run_stack("push")  # state exists: reused, not re-captured
+        self.run_stack("restack", "--from", "3")  # state exists: reused, not re-captured
         again = json.loads(self.state.read_text())
         self.assertEqual(again["branches"]["2"]["orig_sha"], self.sha[2])
 
@@ -359,3 +359,142 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(self.run_stack("abort")[0], 0)
         self.assertEqual({n: g("rev-parse", f"slice/feat-{n}") for n in (2, 3)},
                          {2: self.orig[2], 3: self.orig[3]})
+
+
+class PushTest(unittest.TestCase):
+    """push on the 3-slice chain with a bare origin; slice 1 gets a fixup, then restack."""
+
+    run_stack = StackTest.run_stack
+    fixup = LifecycleTest.fixup
+    conflict = LifecycleTest.conflict
+
+    def setUp(self):
+        LifecycleTest.setUp(self)
+        self.origin = self.plan.parent / "origin.git"
+        g("init", "-q", "--bare", str(self.origin))
+        g("remote", "add", "origin", str(self.origin))
+        g("push", "-q", "origin", "main", "slice/feat-1", "slice/feat-2", "slice/feat-3")
+
+    def remote(self, n):
+        return g("--git-dir", str(self.origin), "rev-parse", f"refs/heads/slice/feat-{n}")
+
+    def local(self, n):
+        return g("rev-parse", f"slice/feat-{n}")
+
+    def restacked(self):  # slice 1 gains a commit, slices 2-3 follow it
+        self.fixup()
+        self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)
+
+    def gh_stub(self, replies):
+        """PATH with a gh script answering `gh pr view <branch>` from replies."""
+        d = self.plan.parent / "bin"
+        d.mkdir()
+        cases = "".join(f"{b}) echo '{j}';; " for b, j in replies.items())
+        (d / "gh").write_text(f'#!/bin/sh\ncase "$3" in {cases}*) exit 1;; esac\n')
+        (d / "gh").chmod(0o755)
+        return (mock.patch("stack.shutil.which", return_value=str(d / "gh")),
+                mock.patch.dict(os.environ, {"PATH": f"{d}{os.pathsep}{os.environ['PATH']}"}))
+
+    def test_push_after_restack_moves_origin_tips_and_records_pushed(self):  # B17
+        self.restacked()
+        self.assertNotEqual(self.remote(2), self.local(2))
+        code, out, _ = self.run_stack("push", "--yes")
+        self.assertEqual(code, 0)
+        self.assertEqual([self.remote(n) for n in (1, 2, 3)], [self.local(n) for n in (1, 2, 3)])
+        self.assertLess(out.index("cost report"), out.index("pushed slice/feat-1"))
+        self.assertIn("branches restacked: 2..3", out)
+        self.assertIn("push complete: 3 pushed, 0 skipped", out)
+        pos = json.loads(self.state.read_text())["position"]
+        self.assertEqual(pos["pushed"], ["slice/feat-1", "slice/feat-2", "slice/feat-3"])
+        code, out, _ = self.run_stack("push", "--yes")  # idempotent re-run
+        self.assertEqual((code, out.count("already pushed")), (0, 3))
+
+    def test_cost_report_counts_changed_patches(self):  # B17
+        self.conflict()
+        Path("a.txt").write_text("alpha-1\nbeta\nresolved\n")
+        g("add", "a.txt")
+        self.assertEqual(self.run_stack("continue")[0], 0)
+        code, out, _ = self.run_stack("push", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("slice/feat-2: 1 patch(es) changed", out)  # resolved by hand
+        self.assertIn("slice/feat-3: 0 patch(es) changed", out)  # replayed identically
+        self.assertIn("reviewers of moved heads must re-review", out)
+
+    def test_unchanged_tip_is_skipped(self):  # B17
+        self.fixup()
+        g("push", "-q", "origin", "slice/feat-1")  # slice 1 is already published, unrestacked
+        self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)
+        before = self.remote(1)
+        code, out, _ = self.run_stack("push", "--yes")
+        self.assertEqual(code, 0)
+        self.assertIn("skip slice/feat-1: tip equals remote", out)
+        self.assertIn("push complete: 2 pushed, 1 skipped", out)
+        self.assertEqual(self.remote(1), before)
+        self.assertEqual((self.remote(2), self.remote(3)), (self.local(2), self.local(3)))
+
+    def test_merged_pr_is_skipped_via_gh_stub(self):  # B17
+        self.restacked()
+        before = self.remote(2)
+        replies = {"slice/feat-2": '{"number":7,"state":"MERGED"}',
+                   "slice/feat-3": '{"number":8,"state":"OPEN"}'}
+        with contextlib.ExitStack() as st:
+            for p in self.gh_stub(replies):
+                st.enter_context(p)
+            code, out, _ = self.run_stack("push", "--yes")
+        self.assertEqual(code, 0)
+        self.assertIn("skip slice/feat-2: PR merged", out)
+        self.assertIn("PRs whose heads will move: #8 (slice/feat-3)", out)
+        self.assertEqual(self.remote(2), before)
+        self.assertEqual((self.remote(1), self.remote(3)), (self.local(1), self.local(3)))
+
+    def test_lease_rejection_aborts_and_abort_spares_pushed_branches(self):  # B17
+        self.restacked()
+        theirs = self.orig[3]  # somebody pushes slice 2 behind our back
+        g("--git-dir", str(self.origin), "update-ref", "refs/heads/slice/feat-2", theirs)
+        code, out, err = self.run_stack("push", "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("concurrent", err)
+        self.assertIn("Nothing after slice/feat-2 was pushed", err)
+        self.assertEqual((self.remote(1), self.remote(2), self.remote(3)),
+                         (self.local(1), theirs, self.orig[3]))  # theirs kept, 3 untouched
+        self.assertEqual(json.loads(self.state.read_text())["position"]["pushed"],
+                         ["slice/feat-1"])
+        pushed_tip = self.local(1)
+        self.assertEqual(self.run_stack("abort")[0], 0)  # pushed branch is not moved back
+        self.assertEqual(self.local(1), pushed_tip)
+        self.assertEqual((self.local(2), self.local(3)), (self.orig[2], self.orig[3]))
+
+    def test_dry_run_prints_plan_and_mutates_nothing(self):  # B17
+        self.restacked()
+        before = g("for-each-ref"), g("--git-dir", str(self.origin), "for-each-ref")
+        code, out, _ = self.run_stack("push", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn(f"push slice/feat-2 --force-with-lease=refs/heads/slice/feat-2:{self.orig[2]}", out)
+        self.assertIn("cost report", out)
+        self.assertNotIn("pushed", json.loads(self.state.read_text())["position"])
+        self.assertEqual((g("for-each-ref"), g("--git-dir", str(self.origin), "for-each-ref")), before)
+
+    def test_cost_report_must_be_accepted_unless_yes(self):  # B17
+        self.restacked()
+        before = self.remote(2)
+        with mock.patch("builtins.input", return_value="n"):
+            code, out, err = self.run_stack("push")
+        self.assertEqual(code, 1)
+        self.assertIn("cost report", out)
+        self.assertIn("declined", err)
+        self.assertEqual(self.remote(2), before)
+        with mock.patch("builtins.input", return_value="y"):
+            self.assertEqual(self.run_stack("push")[0], 0)
+        self.assertEqual(self.remote(2), self.local(2))
+
+    def test_push_needs_a_restack_or_from(self):  # B17
+        code, _, err = self.run_stack("push", "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("no completed restack", err)
+        self.assertFalse(self.state.exists())
+        self.fixup()
+        code, out, _ = self.run_stack("push", "--from", "2", "--yes")  # one step
+        self.assertEqual(code, 0)
+        self.assertIn("rebased slice/feat-2", out)
+        self.assertEqual([self.remote(n) for n in (1, 2, 3)], [self.local(n) for n in (1, 2, 3)])
+        self.assertIn("already recorded", self.run_stack("push", "--from", "2")[2])

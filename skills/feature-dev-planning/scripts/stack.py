@@ -7,10 +7,12 @@ status prints each slice branch in stack order with its local/remote SHA and PR.
 restack --from n replays branches n..N onto their parents; on a conflict it stops,
 writes conflict-report.md beside the plan and leaves the rebase in progress.
 continue finishes the stopped branch (tree resolved + tests green) and carries on;
-abort restores every branch to its recorded SHA. push is not implemented yet: it
-records state and exits 1. Every mutating command supports --dry-run.
+abort restores every branch to its recorded SHA. push prints the cost report, asks to
+proceed (--yes skips), then force-pushes each changed branch with a lease on the remote
+SHA captured at restack time; push --from n restacks first. Every mutating command
+supports --dry-run.
 Exit 1 also means a restack stopped (conflict or red tests): read conflict-report.md.
-Run from inside the repo checkout. Exit 0 = ok, 1 = refused or not implemented.
+Run from inside the repo checkout. Exit 0 = ok, 1 = refused.
 """
 import argparse
 import difflib
@@ -149,11 +151,53 @@ def cmd_status(plan, base, feature, order):
         parent = branch
 
 
+def pr_state(branch):
+    """{'number', 'state'} of the branch's PR, or None (gh absent or no PR)."""
+    if not shutil.which("gh"):
+        return None
+    r = subprocess.run(["gh", "pr", "view", branch, "--json", "number,state"],
+                       capture_output=True, text=True)
+    return json.loads(r.stdout) if r.returncode == 0 else None
+
+def push_skip(branch, s, pr):
+    """Why branch needs no push, or None."""
+    tip = git("rev-parse", "--verify", "-q", f"refs/heads/{branch}")
+    if not tip:
+        return "no local branch"
+    if pr and pr["state"] == "MERGED":
+        return "PR merged"
+    if tip == s["remote_sha"]:
+        return "tip equals remote"
+
+def cost_report(state, feature, prs):
+    """What a push costs: restacked range, patches range-diff says changed, PRs that move."""
+    order, shas = state["order"], state["branches"]
+    done = [int(b.rsplit("-", 1)[1]) for b in state["position"]["applied"]]
+    out = ["cost report:", "  branches restacked: "
+           + (f"{min(done)}..{max(done)}" if done else "none")]
+    moving = []
+    for n in order:
+        branch, s = f"slice/{feature}-{n}", shas[str(n)]
+        if not s["orig_sha"]:
+            continue
+        parent, old = parent_of(state, feature, n)
+        rd = git("range-diff", f"{old}..{s['orig_sha']}", f"{git('rev-parse', parent)}..{branch}") or ""
+        marks = re.findall(r"^\s*\S+:\s+\S+\s+([=!<>])\s+\S+:", rd, re.M)
+        changed = max(marks.count("!") + marks.count("<"), marks.count("!") + marks.count(">"))
+        out.append(f"  {branch}: {changed} patch(es) changed")
+        pr = prs.get(branch)
+        if pr and pr["state"] == "OPEN" and not push_skip(branch, s, pr):
+            moving.append(f"#{pr['number']} ({branch})")
+    out += ["  PRs whose heads will move: " + (", ".join(moving) or "none (or gh absent)"),
+            "  reviewers of moved heads must re-review"]
+    return out
+
 def plan_lines(cmd, state, feature, start):
     """The actions `cmd` would take, plus its cost line — what --dry-run prints."""
     order, base, shas = state["order"], state["base"], state["branches"]
     todo = order[order.index(start):] if cmd == "restack" else order
     lines = []
+    prs = {}
     for n in todo:
         branch, s = f"slice/{feature}-{n}", shas[str(n)]
         i = order.index(n)
@@ -161,8 +205,12 @@ def plan_lines(cmd, state, feature, start):
         if cmd == "restack":
             lines.append(f"rebase {branch} onto {parent}")
         elif cmd == "push":
+            prs[branch] = pr_state(branch)
+            why = push_skip(branch, s, prs[branch])
             lines.append(f"push {branch} --force-with-lease=refs/heads/{branch}:"
                          f"{s['remote_sha'] or ''}")
+            if why:
+                lines[-1] += f"  [skip: {why}]"
         elif cmd == "abort" and s["orig_sha"]:
             lines.append(f"restore {branch} to {s['orig_sha']}")
     if cmd == "continue":
@@ -173,6 +221,8 @@ def plan_lines(cmd, state, feature, start):
     pushed = sum(1 for n in todo if shas[str(n)]["remote_sha"])
     lines.append(f"cost: {len(todo)} branch(es) in play; {pushed} already pushed — "
                  "a moved head needs a force-push and a re-review of its PR")
+    if cmd == "push":
+        lines += cost_report(state, feature, prs)
     return lines
 
 
@@ -387,6 +437,52 @@ def cmd_abort(state, feature, sfile, gitdir):
     return 0
 
 
+def cmd_push(state, feature, sfile, gitdir, fresh, start, yes):
+    if fresh:
+        if not start:
+            die("no completed restack recorded — run stack.py restack <plan> --from <n> "
+                "first, or push --from <n> to restack and push in one step")
+        save(sfile, state)
+        if replay(state, feature, sfile, gitdir, state["order"][state["order"].index(start):]):
+            return 1  # stopped on a conflict: resolve, stack.py continue, then push
+    elif start:
+        die("a restack is already recorded — run push without --from")
+    elif state["position"]["next_branch"]:
+        die("the restack is unfinished — stack.py continue (or abort), then push")
+    shas, pushed = state["branches"], state["position"].setdefault("pushed", [])
+    prs = {f"slice/{feature}-{n}": pr_state(f"slice/{feature}-{n}") for n in state["order"]}
+    print("\n".join(cost_report(state, feature, prs)))
+    if not yes:
+        try:
+            ok = input("Proceed with the force-push? [y/N] ").strip().lower() == "y"
+        except EOFError:
+            ok = False
+        if not ok:
+            print("push declined — nothing pushed (--yes skips this prompt)", file=sys.stderr)
+            return 1
+    count = 0
+    for n in state["order"]:
+        branch, s = f"slice/{feature}-{n}", shas[str(n)]
+        why = "already pushed" if branch in pushed else push_skip(branch, s, prs[branch])
+        if why:
+            print(f"skip {branch}: {why}")
+            continue
+        r = run("push", f"--force-with-lease=refs/heads/{branch}:{s['remote_sha'] or ''}",
+                "origin", branch)
+        if r.returncode:
+            what = ("origin/" + branch + " moved since the restack captured it — a concurrent "
+                    "push? Fetch and inspect it") if "stale info" in r.stderr else "push failed"
+            print(f"REJECTED: {what}. {r.stderr.strip()}\nNothing after {branch} was pushed; "
+                  "re-run push once resolved, or stack.py abort restores the unpushed branches.",
+                  file=sys.stderr)
+            return 1
+        pushed.append(branch)
+        save(sfile, state)
+        count += 1
+        print(f"pushed {branch} -> {git('rev-parse', branch)[:7]}")
+    print(f"push complete: {count} pushed, {len(state['order']) - count} skipped")
+    return 0
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -396,6 +492,9 @@ def main(argv=None):
         sp.add_argument("--dry-run", action="store_true", help="mutate nothing")
         if name == "restack":
             sp.add_argument("--from", dest="start", type=int, help="first slice")
+        if name == "push":
+            sp.add_argument("--from", dest="start", type=int, help="restack from this slice first")
+            sp.add_argument("--yes", action="store_true", help="skip the cost-report prompt")
     args = ap.parse_args(argv)
     if not Path(args.plan).is_file():
         die(f"{args.plan} not found — pass the path to 03-plan.md")
@@ -425,6 +524,9 @@ def main(argv=None):
         for line in plan_lines(args.cmd, state, feature, start):
             print(f"  {line}")
         return 0
+    if args.cmd == "push":
+        return cmd_push(state, feature, sfile, Path(gitdir), not sfile.exists(),
+                        args.start, args.yes)
     if not sfile.exists():
         sfile.write_text(json.dumps(state, indent=2) + "\n")
     gitdir = Path(gitdir)
@@ -432,12 +534,7 @@ def main(argv=None):
         return replay(state, feature, sfile, gitdir, order[order.index(start):])
     if args.cmd == "continue":
         return cmd_continue(state, feature, sfile, gitdir)
-    if args.cmd == "abort":
-        return cmd_abort(state, feature, sfile, gitdir)
-    print(f"state recorded: {sfile}")
-    print(f"{args.cmd}: not implemented yet — no branch was changed; use --dry-run "
-          f"to see the plan, or remove {sfile} to reset", file=sys.stderr)
-    return 1
+    return cmd_abort(state, feature, sfile, gitdir)
 
 
 if __name__ == "__main__":
