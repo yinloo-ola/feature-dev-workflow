@@ -46,10 +46,19 @@ From the main checkout (or any checkout of the repo), run:
 python3 <skill-dir>/scripts/check_slice.py ready .specs/<feature>/03-plan.md <n>
 ```
 
-This verifies every `depends-on` slice's branch (`slice/<feature>-<k>`) is merged into the
-base branch. If not ready, report "slice <n> blocked on slice <k>" and stop. If a dependency
-branch is missing entirely (e.g. after a fresh clone), the merge can't be verified from git —
-report it and let the orchestrator confirm the merge before you proceed.
+What it verifies depends on the plan header's `deliver:` (default `parallel`):
+
+- **`deliver: parallel`** — every `depends-on` slice's branch (`slice/<feature>-<k>`) is
+  merged into the base branch. If not ready, report "slice <n> blocked on slice <k>" and
+  stop. If a dependency branch is missing entirely (e.g. after a fresh clone), the merge
+  can't be verified from git — report it and let the orchestrator confirm the merge before
+  you proceed.
+- **`deliver: stacked`** — each `depends-on` branch exists locally, is pushed
+  (`origin/slice/<feature>-<k>` exists), and descends from its own parent slice's pushed
+  tip. On failure the script prints which check failed (not found locally / not pushed /
+  parent branch not pushed / does not descend from the parent tip — restack needed); report
+  it and stop. `ready` reads the local `origin/*` refs and does not fetch, so run
+  `git fetch origin` first or a freshly pushed parent looks missing.
 
 ## Step 3 — Enter (or create, or resume) your worktree
 
@@ -111,12 +120,20 @@ commands), then commit any remaining changes and run the mechanical gates:
 python3 <skill-dir>/scripts/check_slice.py verify .specs/<feature>/03-plan.md <n>
 ```
 
-The gates check, against the base branch: scope (only declared `files` + `tests` changed),
-size (≤350 changed lines excluding lockfiles/generated code), mode (additive and migrate
-slices delete almost nothing — only contract slices may delete), and tests (declared test
-files actually changed). Fix failures by
-changing your code or (if the gate exposed a genuine plan defect) report and stop — never
-edit the plan to make the gate pass.
+The gates check, against the base branch:
+
+- **scope** — a changed production file outside the card's declared `files` + `tests`
+  fails; an undeclared *test* file edit only prints a `WARN` for the orchestrator to
+  resolve (add it to the card or revert it).
+- **deletions** — any non-test deleted line fails unless the card declares
+  `deletes-existing: yes — <what and why>`.
+- **tests** — every declared test file must change (`tests: none` is honored).
+
+There is no size cap. The report prints a size breakdown — `code`, `tests`,
+`data/generated` lines — which feeds the review bundle's risk class. `mode:` is legacy and
+advisory: it is printed as context and gates nothing. Fix failures by changing your code or
+(if the gate exposed a genuine plan defect) report and stop — never edit the plan to make
+the gate pass.
 
 ## Step 6 — Open the PR
 
@@ -126,7 +143,9 @@ Push your branch and open a PR:
 - Body: the card's goal and acceptance criteria (copy from the card), **proof** — for each
   Behavior the card cites, either the command and its actual output, or the test that maps
   to it (file + row names) — what was tested, and the one reviewable decision this PR makes.
-- Base: the plan's base branch.
+- Base, by the plan header's `deliver:` — `parallel`: the plan's base branch; `stacked`:
+  the parent slice's branch (`slice/<feature>-<k>` for the `depends-on` slice Step 2
+  checked; slice n-1 in a linear stack), and the PR body names that base. Never merge your own PR, whatever the base.
 
 Report back: PR link, slice number, gate output, and anything the orchestrator should know
 (deviations, follow-ups discovered). After the PR merges, the worktree can be removed with
