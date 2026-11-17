@@ -9,7 +9,8 @@ writes conflict-report.md beside the plan and leaves the rebase in progress.
 continue finishes the stopped branch (tree resolved + tests green) and carries on;
 abort restores every branch to its recorded SHA. push is not implemented yet: it
 records state and exits 1. Every mutating command supports --dry-run.
-Run from inside the repo checkout. Exit 0 = ok, 1 = refused, stopped, or not implemented.
+Exit 1 also means a restack stopped (conflict or red tests): read conflict-report.md.
+Run from inside the repo checkout. Exit 0 = ok, 1 = refused or not implemented.
 """
 import argparse
 import difflib
@@ -41,7 +42,7 @@ def run(*args, env=None):
 
 def git(*args):
     """Return stripped stdout, or None when git exits non-zero."""
-    r = run(*args)
+    r = subprocess.run(["git", *args], capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else None
 
 
@@ -408,9 +409,8 @@ def main(argv=None):
     start = getattr(args, "start", None) or order[0]
     if start not in order:
         die(f"--from {start}: no such slice — the plan has slices {order}")
-    gitdir = Path(gitdir)
-    safety(gitdir, base, feature, order, resuming=args.cmd in RESUMING)
-    sfile = gitdir / "stack-state.json"
+    safety(Path(gitdir), base, feature, order, resuming=args.cmd in RESUMING)
+    sfile = Path(gitdir) / "stack-state.json"
     if args.cmd in RESUMING and not sfile.exists():
         die(f"no restack in progress — nothing to {args.cmd}; start one with "
             "stack.py restack <plan> --from <n>")
@@ -426,7 +426,8 @@ def main(argv=None):
             print(f"  {line}")
         return 0
     if not sfile.exists():
-        save(sfile, state)
+        sfile.write_text(json.dumps(state, indent=2) + "\n")
+    gitdir = Path(gitdir)
     if args.cmd == "restack":
         return replay(state, feature, sfile, gitdir, order[order.index(start):])
     if args.cmd == "continue":
