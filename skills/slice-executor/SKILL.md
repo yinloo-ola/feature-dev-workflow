@@ -120,7 +120,7 @@ commands), then commit any remaining changes and run the mechanical gates:
 python3 <skill-dir>/scripts/check_slice.py verify .specs/<feature>/03-plan.md <n>
 ```
 
-The gates check, against the base branch:
+The gates check, against the base branch (for deliver: stacked, the parent slice's branch):
 
 - **scope** — a changed production file outside the card's declared `files` + `tests`
   fails; an undeclared *test* file edit only prints a `WARN` for the orchestrator to
