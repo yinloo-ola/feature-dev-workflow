@@ -10,6 +10,9 @@ Modes:
   verify  <plan.md> <n>  — post-implementation gates, before opening the PR:
                            scope, deletions, tests (all always-wrong), plus the
                            size report (code/tests/data-generated; never fails).
+                           deliver: stacked with depends-on diffs against the
+                           parent slice's branch (slice/<f>-<highest dep>), not
+                           the plan base.
                            mode: is legacy, printed as advisory context only.
                            (run from the worktree)
 
@@ -166,8 +169,12 @@ def cmd_verify(plan_path, n):
         fail(["working tree is not clean — commit or remove changes first:",
               *[f"    {l}" for l in out.splitlines()]])
 
-    rc, out = git("rev-parse", "--verify", base)
-    if rc != 0:
+    if deliver == "stacked" and card["deps"]:  # linear stack: highest depends-on is the parent
+        base = f"slice/{feature}-{max(card['deps'])}"
+        if git("rev-parse", "--verify", base)[0] != 0:
+            fail([f"parent branch {base} not found — stacked verify needs it checked out "
+                  f"locally; git fetch origin {base}:{base}"])
+    elif git("rev-parse", "--verify", base)[0] != 0:
         fail([f"base branch {base!r} not found in this repo"])
 
     rc, out = git("diff", "--numstat", f"{base}...HEAD")

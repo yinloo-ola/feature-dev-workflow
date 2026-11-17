@@ -204,6 +204,59 @@ class VerifyGates(unittest.TestCase):
         self.assertIn("size report — code: 1, tests: 0, data/generated: 0 (no cap)", out)
 
 
+class StackedVerify(unittest.TestCase):
+    """Slice 10: deliver: stacked verifies against the parent slice branch."""
+
+    def setUp(self):
+        self._t = tempfile.TemporaryDirectory()
+        self.addCleanup(self._t.cleanup)
+        self.r = Repo(self._t.name)
+        self.r.branch("slice/feat-1")
+        self.r.write("s1.txt", "1\n")
+        self.r.write("test_s1.py", "t\n")
+        self.r.commit("s1")
+        self.r.branch("slice/feat-2")
+        self.r.write("src/a.py", "a\nb\nc\nd\n")
+        self.r.write("test_a.py", "t\n")
+        self.r.commit("s2")
+
+    def cards(self):
+        return {1: {"files": ["s1.txt"], "tests": ["test_s1.py"]},
+                2: {"deps": [1], "files": ["src/a.py"], "tests": ["test_a.py"]}}
+
+    def test_stacked_diffs_against_parent(self):
+        rc, out = self.r.run("verify", 2, plan_text("stacked", self.cards()))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("vs slice/feat-1;", out)
+
+    def test_parallel_same_repo_parent_files_out_of_scope(self):
+        rc, out = self.r.run("verify", 2, plan_text("parallel", self.cards()))
+        self.assertEqual(rc, 1)
+        self.assertIn("s1.txt", out)
+        self.assertIn("scope:", out)
+
+    def test_stacked_highest_dep_is_parent(self):
+        self.r.git("branch", "slice/feat-0", "main")  # lower dep must not be picked
+        cards = self.cards()
+        cards[2]["deps"] = [0, 1]
+        rc, out = self.r.run("verify", 2, plan_text("stacked", cards))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("vs slice/feat-1;", out)
+
+    def test_stacked_no_depends_on_uses_plan_base(self):
+        self.r.git("checkout", "-q", "slice/feat-1")
+        rc, out = self.r.run("verify", 1, plan_text("stacked", self.cards()))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("vs main;", out)
+
+    def test_stacked_missing_parent_branch_fails(self):
+        self.r.git("branch", "-m", "slice/feat-1", "elsewhere")
+        rc, out = self.r.run("verify", 2, plan_text("stacked", self.cards()))
+        self.assertEqual(rc, 1)
+        self.assertIn("parent branch slice/feat-1 not found — stacked verify needs it checked "
+                      "out locally; git fetch origin slice/feat-1:slice/feat-1", out)
+
+
 class Ready(unittest.TestCase):
     def setUp(self):
         self._t = tempfile.TemporaryDirectory()
