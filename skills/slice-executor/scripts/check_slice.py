@@ -2,10 +2,16 @@
 """Deterministic gates for slice execution. Run from inside the slice's worktree.
 
 Modes:
-  ready   <plan.md> <n>  — pre-flight: are slice n's depends-on branches merged
-                           into the plan's base branch? (run from any checkout)
+  ready   <plan.md> <n>  — pre-flight. deliver: parallel (default) — are slice n's
+                           depends-on branches merged into the plan's base branch?
+                           deliver: stacked — does each depends-on branch exist,
+                           exist on origin, and descend from its parent's tip?
+                           (run from any checkout)
   verify  <plan.md> <n>  — post-implementation gates, before opening the PR:
-                           scope, size, mode, tests. (run from the worktree)
+                           scope, deletions, tests (all always-wrong), plus the
+                           size report (code/tests/data-generated; never fails).
+                           mode: is legacy, printed as advisory context only.
+                           (run from the worktree)
 
 Exit 0 = pass, 1 = fail (reasons printed).
 """
@@ -15,17 +21,18 @@ import sys
 from pathlib import Path
 
 SLICE_RE = re.compile(r"^### Slice (\d+):")
-MODES = {"additive", "migrate", "contract"}
-# Files excluded from the size gate and allowed without declaration in `files`
+# Files classed data/generated in the size report; exempt from scope and deletions
 EXCLUDED = [
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock",
     "Cargo.lock", "go.sum", "uv.lock", "Gemfile.lock",
 ]
-EXCLUDED_SUFFIX = (".pb.go", "_pb2.py", ".min.js", ".map")
+EXCLUDED_SUFFIX = (".pb.go", "_pb2.py", ".min.js", ".map", ".po", ".pot")
 EXCLUDED_PARTS = ("vendor/", "node_modules/", "dist/", "build/", "generated/")
 TEST_RE = re.compile(r"(_test\.go$|_test\.py$|\.test\.(ts|tsx|js|mjs)$|\.spec\.(ts|tsx|js)$|_test\.rs$)")
-SIZE_CAP = 350          # changed lines (adds+dels), non-excluded files
-ADDITIVE_DEL_CAP = 10   # deletions outside test files allowed in additive mode
+GENERATED_RE = re.compile(r"Code generated .* DO NOT EDIT\.")  # first two lines of file
+DELIVER_RE = re.compile(r"^deliver:\s*(parallel|stacked)$", re.M)
+DELETES_RE = re.compile(r"^yes\s*—\s*(\S.*)$")  # same grammar as plan_lint
+UNDECLARED_TEST = "undeclared test file edited — orchestrator to resolve (add to card or revert)"
 
 
 def fail(msgs):
@@ -41,30 +48,34 @@ def git(*args):
 
 
 def parse_plan(path):
-    """Return (base_branch, feature, {num: card}) where card = dict(mode, deps, files, tests)."""
+    """Return (base_branch, feature, {num: card}, deliver);
+    card = dict(mode, deletes, deps, files, tests)."""
     text = Path(path).read_text()
     base = re.search(r"^Base branch:\s*(\S+)", text, re.M)
     if not base:
         fail([f"{path}: missing 'Base branch:' header"])
     m = re.search(r"^# Plan:\s*(\S+)", text, re.M)
     feature = m.group(1) if m else Path(path).resolve().parent.name
+    deliver = (DELIVER_RE.search(text) or [None, "parallel"])[1]
     slices, current, field = {}, None, None
     for line in text.splitlines():
         m = SLICE_RE.match(line)
         if m:
             current, field = int(m.group(1)), None
-            slices[current] = {"mode": None, "deps": [], "files": [], "tests": []}
+            slices[current] = {"mode": None, "deletes": "no", "deps": [], "files": [], "tests": []}
             continue
         if current is None:
             continue
         stripped = line.strip()
-        m = re.match(r"^- (mode|depends-on|files|tests):(.*)$", stripped)
+        m = re.match(r"^- (mode|deletes-existing|depends-on|files|tests):(.*)$", stripped)
         if m:
             key, rest = m.group(1), m.group(2).strip()
             field = key if key in ("files", "tests") else None
             c = slices[current]
             if key == "mode":
                 c["mode"] = rest
+            elif key == "deletes-existing":
+                c["deletes"] = rest
             elif key == "depends-on":
                 c["deps"] = [int(d) for d in re.findall(r"\d+", rest)]
             elif key in ("files", "tests") and rest:
@@ -72,14 +83,14 @@ def parse_plan(path):
             continue
         if line.startswith("  - ") and field in ("files", "tests"):
             slices[current][field].append(line[4:].strip())
-    return base.group(1), feature, slices
+    return base.group(1), feature, slices, deliver
 
 
 def get_card(plan_path, n):
-    base, feature, slices = parse_plan(plan_path)
+    base, feature, slices, deliver = parse_plan(plan_path)
     if n not in slices:
         fail([f"slice {n} not found in {plan_path}"])
-    return base, slices[n], feature
+    return base, slices[n], feature, deliver, slices
 
 
 def is_excluded(path):
@@ -92,14 +103,26 @@ def is_testfile(path, tests):
     return path in tests or bool(TEST_RE.search(path))
 
 
+def is_generated(path):
+    """Data/generated: EXCLUDED lists, or a 'Code generated ... DO NOT EDIT.' header
+    in the first two lines of the file at HEAD."""
+    if is_excluded(path):
+        return True
+    rc, out = git("show", f"HEAD:{path}")
+    return rc == 0 and bool(GENERATED_RE.search("\n".join(out.splitlines()[:2])))
+
+
 def cmd_ready(plan_path, n):
-    base, card, feature = get_card(plan_path, n)
+    base, card, feature, deliver, slices = get_card(plan_path, n)
     if not card["deps"]:
         print(f"OK: slice {n} has no dependencies — ready.")
         return
     blocked = []
     for dep in card["deps"]:
         branch = f"slice/{feature}-{dep}"
+        if deliver == "stacked":
+            blocked += stacked_problems(feature, dep, branch, slices[dep]["deps"])
+            continue
         rc, _ = git("merge-base", "--is-ancestor", branch, base)
         if rc != 0:
             rc2, _ = git("rev-parse", "--verify", branch)
@@ -110,16 +133,32 @@ def cmd_ready(plan_path, n):
                 blocked.append(f"slice {dep}: branch {branch} not merged into {base}")
     if blocked:
         fail([f"slice {n} is blocked:"] + [f"    {b}" for b in blocked])
-    print(f"OK: all dependencies of slice {n} merged into {base}.")
+    if deliver == "stacked":
+        print(f"OK: all dependencies of slice {n} exist, are pushed, and sit on their parent tips.")
+    else:
+        print(f"OK: all dependencies of slice {n} merged into {base}.")
+
+
+def stacked_problems(feature, dep, branch, parents):
+    """Which stacked-readiness check failed for dependency slice `dep` (empty = ready)."""
+    if git("rev-parse", "--verify", branch)[0] != 0:
+        return [f"slice {dep}: branch {branch} not found locally"]
+    if git("rev-parse", "--verify", f"origin/{branch}")[0] != 0:
+        return [f"slice {dep}: branch {branch} not pushed (origin/{branch} not found)"]
+    out = []
+    for p in parents:  # the dep must sit on top of its own parent slice's pushed tip
+        pb = f"slice/{feature}-{p}"
+        if git("rev-parse", "--verify", f"origin/{pb}")[0] != 0:
+            out.append(f"slice {dep}: parent branch {pb} not pushed (origin/{pb} not found)")
+        elif git("merge-base", "--is-ancestor", f"origin/{pb}", f"origin/{branch}")[0] != 0:
+            out.append(f"slice {dep}: origin/{branch} does not descend from parent tip "
+                       f"origin/{pb} — restack needed")
+    return out
 
 
 def cmd_verify(plan_path, n):
-    base, card, feature = get_card(plan_path, n)
+    base, card, feature, deliver, _ = get_card(plan_path, n)
     branch = f"slice/{feature}-{n}"
-
-    if card["mode"] not in MODES:
-        fail([f"slice {n}: mode {card['mode']!r} is not one of {sorted(MODES)} — "
-              "fix the plan (a typo'd mode must never silently skip the gates)"])
 
     # working tree must be clean (gates evaluate committed diff)
     rc, out = git("status", "--porcelain")
@@ -137,55 +176,52 @@ def cmd_verify(plan_path, n):
     if not out.strip():
         fail([f"no changes between {base} and HEAD — nothing to verify"])
 
-    errors, changed = [], []
-    size = dels_non_test = 0
+    errors, warnings, changed = [], [], []
+    code = tests = generated = dels_non_test = 0
     for line in out.splitlines():
         parts = line.split("\t", 2)
         if len(parts) != 3:
             continue
         adds, dels, path = parts
         changed.append(path)
-        if is_excluded(path):
-            continue
-        adds = 0 if adds == "-" else int(adds)
+        lines = (0 if adds == "-" else int(adds)) + (0 if dels == "-" else int(dels))
         dels = 0 if dels == "-" else int(dels)
-        size += adds + dels
-        if not is_testfile(path, card["tests"]):
+        # size report: classify every changed line (never gates)
+        if is_generated(path):
+            generated += lines
+        elif is_testfile(path, card["tests"]):
+            tests += lines
+        else:
+            code += lines
             dels_non_test += dels
 
-    # scope gate
+    # scope gate: production file outside the card = FAIL; test file = WARN
     allowed = set(card["files"]) | set(card["tests"])
-    scope_violations = [p for p in changed if p not in allowed and not is_excluded(p)]
-    if scope_violations:
-        errors.append(f"scope: changed files outside the card's declared files/tests: "
-                      f"{scope_violations}")
+    outside = [p for p in changed if p not in allowed and not is_excluded(p)]
+    prod = [p for p in outside if not is_testfile(p, card["tests"])]
+    if prod:
+        errors.append(f"scope: changed files outside the card's declared files/tests: {prod}")
+    warnings += [f"scope: {p}: {UNDECLARED_TEST}" for p in outside if p not in prod]
 
-    # size gate
-    if size > SIZE_CAP:
-        errors.append(f"size: {size} changed lines (cap {SIZE_CAP}, excluding "
-                      "lockfiles/generated) — split the slice or trim the diff")
+    # deletions gate: non-test deletions need deletes-existing: yes — <what and why>
+    if dels_non_test > 0 and not DELETES_RE.match(card["deletes"]):
+        errors.append(f"deletions: {dels_non_test} non-test lines deleted — declare "
+                      "deletes-existing: yes — <what and why> on the card")
 
-    # mode gate: only contract slices may delete (additive and migrate are capped)
-    if card["mode"] in ("additive", "migrate") and dels_non_test > ADDITIVE_DEL_CAP:
-        errors.append(f"mode: {card['mode']} slice deletes {dels_non_test} lines outside test "
-                      f"files (cap {ADDITIVE_DEL_CAP}) — only contract slices may delete; "
-                      "deletions belong to the final contract slice")
-
-    # test gate: declared test files must be in the diff; "tests: none" (declared)
-    # is honored, an undeclared/empty tests field on a behavior change is not
+    # test gate: declared test files must be in the diff; "tests: none" is honored
     if card["tests"] and card["tests"] != ["none"]:
         missing = [t for t in card["tests"] if t not in changed]
         if missing:
             errors.append(f"tests: declared test files not changed in this diff: {missing}")
-    elif card["tests"] != ["none"] and card["mode"] in ("additive", "migrate") and not any(
-            is_testfile(p, card["tests"]) for p in changed):
-        errors.append("tests: behavior-changing slice with no test files declared or changed "
-                      "(declare 'tests: none' with justification in the plan if intended)")
 
+    advisory = f" (legacy mode: {card['mode']}, advisory)" if card["mode"] else ""
+    print(f"slice {n} ({branch}) vs {base}; deliver: {deliver}{advisory}")
+    for w in warnings:
+        print(f"WARN: {w}")
+    print(f"size report — code: {code}, tests: {tests}, data/generated: {generated} (no cap)")
     if errors:
         fail([f"slice {n} ({branch}) vs {base}:"] + errors)
-    print(f"OK: slice {n} — {len(changed)} files, {size} changed lines; "
-          f"scope/size/mode/tests gates passed.")
+    print(f"OK: slice {n} — {len(changed)} files; scope/deletions/tests gates passed.")
 
 
 if __name__ == "__main__":
