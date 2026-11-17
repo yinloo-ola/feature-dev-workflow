@@ -10,10 +10,12 @@ complete on its own.
 # Plan: <feature>
 
 Base branch: main
+deliver: parallel
 Stack: <from 02-rfc.md, only when stated — polyglot/greenfield cases>
 
 ### Slice 1: <imperative title, one reviewable decision>
 - mode: additive
+- deletes-existing: no
 - depends-on: []
 - files:
   - internal/payments/processor.go
@@ -34,8 +36,11 @@ Field rules (enforced by `plan_lint.py`):
 Structural rules are enforced mechanically by the linter; the zero-ambiguity rule below is
 procedural — enforced by the cold-start test and by slice-executor's stop-and-report rule.
 
-- `mode`: `additive` (no deletions of existing behavior), `migrate`, or `contract`
-  (deletions/cleanup). Slice 1 must be `additive`. Only `contract` slices may delete.
+- Plan header `deliver`: `parallel` | `stacked` (default `parallel` when omitted).
+- `mode`: LEGACY, advisory — still accepted (the linter prints a WARN), never gating. The v2
+  field is `deletes-existing`: `no` (default, may be omitted) | `yes — <what and why>` (must
+  carry reason text after `yes —`). Slice 1 must be `no`. The example above shows both forms
+  accepted. Any card whose diff deletes existing lines declares `deletes-existing: yes`.
 - `depends-on`: slice numbers that must be **merged** before this slice starts. Empty `[]`
   means parallelizable immediately. Add an edge for semantic dependencies (this slice needs
   that slice's behavior to exist), not just file overlap. When in doubt, add the edge.
@@ -43,11 +48,14 @@ procedural — enforced by the cold-start test and by slice-executor's stop-and-
   nothing outside `files` + `tests`. This is a hard scope gate — declare honestly and completely.
 - `tests`: test files that must exist and cover the slice's behavior changes. `tests: none` is
   allowed only with a one-line justification in the card.
+  Changing behavior an existing test asserts obligates declaring that test file under
+  `tests:`, with the note "update existing expectations".
 
 ## Slicing rules
 
 1. **One reviewable decision per PR.** If a card needs an "and also" sentence, it's two slices.
-   ~350 changed lines is the backstop for a card's total file set, not a target to fill.
+   ~350 changed lines is slicing-time guidance for a card's total file set — not a target to
+   fill, and no longer a gate.
 2. **Expand → migrate → contract, never mixed.** No slice mixes additions and deletions of the
    same behavior. Deletions of old paths are the final `contract` slice, reviewable with
    near-zero scrutiny.
@@ -64,6 +72,8 @@ procedural — enforced by the cold-start test and by slice-executor's stop-and-
    card is ambiguous — a plan defect. Pin everything interpretive in the card: exact
    identifiers, signatures/routes, data shapes, error behavior, and acceptance criteria.
    "Sensible" is not a spec.
+8. **Chains collapse.** A slice that only continues the previous slice's files/behavior was
+   split for line count, not review; a PR boundary must be a reviewable decision.
 
 ## Slicing procedure
 
