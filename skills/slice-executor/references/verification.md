@@ -50,4 +50,8 @@ small or scripted. If proving a behavior honestly is impossible in your environm
 - No skips, no `t.Skip`, no commented-out assertions, no weakened test to make it pass.
   If a test you wrote can't pass, the card's assumptions are wrong — report and stop.
 - After the loop is green, run the mechanical gates (`check_slice.py verify`) — the loop
-  checks *behavior*, the gates check *shape*. Both must pass.
+  checks *behavior*, the gates check *shape*. Both must pass. The gates are scope
+  (production files outside the card fail; undeclared test files warn), deletions
+  (non-test deletions need `deletes-existing: yes — <what and why>`), and tests (declared
+  test files must change); the report adds a code / tests / data-generated size breakdown
+  that feeds the review bundle's risk class. There is no size cap, and `mode:` is advisory.
