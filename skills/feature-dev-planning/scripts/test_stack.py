@@ -47,7 +47,9 @@ class StackTest(unittest.TestCase):
         self.addCleanup(os.chdir, os.getcwd())
         os.chdir(repo)
         g("init", "-q", "-b", "main")
-        g("commit", "-q", "--allow-empty", "-m", "base")
+        Path("f.txt").write_text("x\n")
+        g("add", "f.txt")
+        g("commit", "-q", "-m", "base")
         self.sha = {}
         for n in (1, 2):  # slice 3 has no branch yet
             g("switch", "-q", "-c", f"slice/feat-{n}")
@@ -87,8 +89,8 @@ class StackTest(unittest.TestCase):
         self.assertIn("edges must point to earlier", err)
 
     def test_mutating_command_writes_state_with_captured_shas(self):
-        code, _, err = self.run_stack("restack", "--from", "2")
-        self.assertEqual(code, 1)  # replay itself is not implemented yet
+        code, _, err = self.run_stack("push")
+        self.assertEqual(code, 1)  # push itself is not implemented yet
         self.assertIn("not implemented yet", err)
         state = json.loads(self.state.read_text())
         self.assertEqual(state.pop("created_at")[:2], "20")
@@ -101,20 +103,20 @@ class StackTest(unittest.TestCase):
                 "2": {"orig_sha": self.sha[2], "remote_sha": None},
                 "3": {"orig_sha": None, "remote_sha": None},
             },
-            "position": {"next_branch": "slice/feat-2", "applied": []},
+            "position": {"next_branch": "slice/feat-1", "applied": []},
         })
         # A second run must not overwrite the recorded original SHAs.
         g("commit", "-q", "--allow-empty", "-m", "moved")
         g("branch", "-f", "slice/feat-2", "HEAD")
-        self.run_stack("push")
+        self.run_stack("push")  # state exists: reused, not re-captured
         again = json.loads(self.state.read_text())
         self.assertEqual(again["branches"]["2"]["orig_sha"], self.sha[2])
 
     def test_safety_refusals_exit_nonzero_with_remediation(self):  # B13/B17 refusals
         git_dir = Path(".git")
         cases = {  # name: (make unsafe, undo, remediation text)
-            "dirty tree": (lambda: Path("junk").write_text("x"),
-                           lambda: Path("junk").unlink(), "git stash -u"),
+            "dirty tree": (lambda: Path("f.txt").write_text("changed\n"),
+                           lambda: g("checkout", "f.txt"), "git stash -u"),
             "index.lock": (lambda: (git_dir / "index.lock").touch(),
                            lambda: (git_dir / "index.lock").unlink(), "remove the lock: rm "),
             "unfinished rebase": (lambda: (git_dir / "rebase-merge").mkdir(),
@@ -125,7 +127,10 @@ class StackTest(unittest.TestCase):
         }
         for name, (make, undo, remediation) in cases.items():
             make()
+            exempt = name in ("dirty tree", "unfinished rebase")
             for cmd in stack.MUTATING:
+                if exempt and cmd in stack.RESUMING:
+                    continue  # covered by test_resuming_commands_exempt_...
                 with self.subTest(case=name, cmd=cmd):
                     code, _, err = self.run_stack(cmd)
                     self.assertEqual(code, 1)
@@ -133,12 +138,30 @@ class StackTest(unittest.TestCase):
                     self.assertFalse(self.state.exists())
             undo()
 
+    def test_resuming_commands_exempt_from_dirty_and_rebase_refusals(self):  # amendment (a)
+        Path("f.txt").write_text("changed\n")  # dirty tree
+        (Path(".git") / "rebase-merge").mkdir()  # open rebase (no head-name: HEAD is main)
+        for cmd in stack.RESUMING:
+            with self.subTest(cmd=cmd):
+                code, _, err = self.run_stack(cmd)
+                self.assertEqual(code, 1)
+                self.assertIn("no restack in progress", err)  # past safety, no state file
+        (Path(".git") / "index.lock").touch()  # but the lock still refuses them
+        for cmd in stack.RESUMING:
+            with self.subTest(cmd=cmd, case="lock"):
+                self.assertIn("remove the lock", self.run_stack(cmd)[2])
+
+    def test_untracked_files_never_block(self):  # amendment (b)
+        Path(".specs").mkdir()
+        Path(".stack-conflict").mkdir()
+        Path("conflict-report.md").write_text("x")
+        code, _, _ = self.run_stack("restack", "--dry-run")
+        self.assertEqual(code, 0)
+
     def test_dry_run_prints_plan_and_mutates_nothing(self):
         before = g("for-each-ref"), g("rev-parse", "HEAD")
         expected = {
             "restack": "rebase slice/feat-2 onto slice/feat-1",
-            "continue": "continue the restack at slice/feat-1",
-            "abort": f"restore slice/feat-2 to {self.sha[2]}",
             "push": f"push slice/feat-1 --force-with-lease=refs/heads/slice/feat-1:{self.sha[1]}",
         }
         for cmd, action in expected.items():
@@ -153,3 +176,186 @@ class StackTest(unittest.TestCase):
         _, out, _ = self.run_stack("restack", "--dry-run", "--from", "3")
         self.assertNotIn("rebase slice/feat-2", out)
         self.assertIn("rebase slice/feat-3 onto slice/feat-2", out)
+
+
+CHAIN = """# Plan: feat
+
+Base branch: main
+
+### Slice 1: one
+- depends-on: []
+
+### Slice 2: two
+- depends-on: [1]
+- card: |
+    Goal: edit the gamma line.
+    Acceptance: Behaviors B13, B14.
+
+### Slice 3: three
+- depends-on: [2]
+"""
+
+
+def commit(name, text, msg):
+    Path(name).write_text(text)
+    g("add", name)
+    g("commit", "-q", "-m", msg)
+
+
+class LifecycleTest(unittest.TestCase):
+    """restack / continue / abort on a 3-slice chain; slice 1 later gets a fixup."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        self.plan = root / "03-plan.md"
+        self.plan.write_text(CHAIN)
+        self.marker = root / "tests-ran"
+        repo = root / "repo"
+        repo.mkdir()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(repo)
+        g("init", "-q", "-b", "main")
+        for k, v in (("user.name", "t"), ("user.email", "t@t"), ("commit.gpgsign", "false")):
+            g("config", k, v)  # stack.py's own git calls need an identity
+        commit("a.txt", "alpha\nbeta\ngamma\n", "base")
+        g("switch", "-q", "-c", "slice/feat-1")
+        commit("a.txt", "alpha-1\nbeta\ngamma\n", "slice 1")
+        g("switch", "-q", "-c", "slice/feat-2")
+        commit("a.txt", "alpha-1\nbeta\ngamma-2\n", "slice 2: edit gamma")
+        g("switch", "-q", "-c", "slice/feat-3")
+        commit("b.txt", "b\n", "slice 3")
+        g("switch", "-q", "slice/feat-1")
+        self.orig = {n: g("rev-parse", f"slice/feat-{n}") for n in (1, 2, 3)}
+        self.state = Path(".git/stack-state.json")
+        # The slice's build+tests: a fake Makefile; untracked, so never blocks anything.
+        Path("Makefile").write_text(f"test:\n\t@echo ran >> {self.marker}\n")
+        patcher = mock.patch("stack.shutil.which", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    run_stack = StackTest.run_stack
+
+    def fixup(self):  # new commit on slice 1 (checked out) after slice 2 forked from it
+        commit("c.txt", "c\n", "fixup")
+
+    def ancestors_ok(self):  # each branch sits directly on the previous one
+        for n in (2, 3):
+            self.assertEqual(g("rev-parse", f"slice/feat-{n - 1}"),
+                             g("merge-base", f"slice/feat-{n - 1}", f"slice/feat-{n}"))
+
+    def conflict(self):
+        """main moves under the stack (edits gamma, like slice 2): slice 1 rebases
+        cleanly, then slice 2 collides with the new commit underneath it."""
+        g("switch", "-q", "main")
+        commit("a.txt", "alpha\nbeta\ngamma-main\n", "main moves gamma")
+        code, _, err = self.run_stack("restack", "--from", "1")
+        self.assertEqual(code, 1)
+        self.assertIn("CONFLICT", err)
+
+    def test_restack_clean_replays_k_to_n_in_order(self):  # B13 clean path
+        self.fixup()  # slice 1 gains c.txt; no overlap with slice 2/3
+        tip1 = g("rev-parse", "slice/feat-1")
+        code, out, _ = self.run_stack("restack", "--from", "2")
+        self.assertEqual(code, 0)
+        self.assertLess(out.index("rebased slice/feat-2"), out.index("rebased slice/feat-3"))
+        self.assertEqual(g("rev-parse", "slice/feat-1"), tip1)  # before --from: untouched
+        self.assertNotEqual(g("rev-parse", "slice/feat-2"), self.orig[2])
+        self.ancestors_ok()
+        self.assertEqual(g("log", "--format=%s", "-3", "slice/feat-3").splitlines(),
+                         ["slice 3", "slice 2: edit gamma", "fixup"])
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state["position"], {"next_branch": None,
+                                             "applied": ["slice/feat-2", "slice/feat-3"]})
+        self.assertEqual(g("status", "--porcelain", "--untracked-files=no"), "")
+        code, _, err = self.run_stack("restack", "--from", "2")  # state kept for push/abort
+        self.assertIn("already recorded", err)
+
+    def test_conflict_stops_with_seven_section_report_and_state(self):  # B13/B14
+        self.conflict()
+        self.assertTrue(Path(".git/rebase-merge").exists())  # left in progress
+        pos = json.loads(self.state.read_text())["position"]
+        self.assertEqual(pos, {"next_branch": "slice/feat-2", "applied": ["slice/feat-1"]})
+        report = (self.plan.parent / "conflict-report.md").read_text()
+        for n, title in enumerate(("Position", "Incoming intent", "Underneath intent",
+                                   "Conflicted files", "Hunk classification",
+                                   "Blast radius", "Decision rules"), 1):
+            self.assertRegex(report, rf"(?m)^## {n}\. {title}")
+        self.assertIn("branch: slice/feat-2", report)
+        self.assertIn("slice 2: edit gamma", report)  # commit subject
+        self.assertIn("parent branch: slice/feat-1", report)
+        self.assertIn("### Slice 2: two", report)  # the card, in full
+        self.assertIn("B13, B14", report)
+        self.assertIn("main moves gamma", report.split("## 3.")[1].split("## 4.")[0])  # underneath
+        self.assertIn("0 identical, 0 changed, 1 not yet applied", report.split("## 6.")[1])
+        self.assertIn("likely semantic", report)
+        art = self.plan.parent / ".stack-conflict" / "2"
+        self.assertEqual(sorted(p.name for p in art.iterdir()),
+                         ["1-base-a.txt", "1-ours-a.txt", "1-theirs-a.txt"])
+        self.assertEqual((art / "1-ours-a.txt").read_text(), "alpha-1\nbeta\ngamma-main\n")
+        self.assertIn("python3", report.split("## 7.")[1])
+        self.assertIn(" continue ", report.split("## 7.")[1])
+
+    def test_continue_runs_tests_then_proceeds(self):  # B15
+        self.conflict()
+        Path("a.txt").write_text("alpha-1\nbeta\nresolved\n")
+        g("add", "a.txt")
+        code, out, _ = self.run_stack("continue")
+        self.assertEqual(code, 0)
+        self.assertIn("tests green: make test", out)
+        self.assertEqual(self.marker.read_text(), "ran\n")  # the discovered command ran
+        self.assertIn("rebased slice/feat-3", out)  # proceeded to the next branch
+        self.ancestors_ok()
+        self.assertEqual(g("show", "slice/feat-2:a.txt"), "alpha-1\nbeta\nresolved")
+        self.assertFalse(Path(".git/rebase-merge").exists())
+        pos = json.loads(self.state.read_text())["position"]
+        self.assertEqual(pos["applied"], ["slice/feat-1", "slice/feat-2", "slice/feat-3"])
+
+    def test_continue_refuses_unresolved_and_red_tests(self):  # B15
+        self.conflict()
+        code, _, err = self.run_stack("continue")  # still unmerged
+        self.assertEqual(code, 1)
+        self.assertIn("unresolved conflicts", err)
+        Path("a.txt").write_text("alpha-1\nbeta\nresolved\n")
+        g("add", "a.txt")
+        Path("Makefile").write_text("test:\n\t@exit 3\n")
+        code, _, err = self.run_stack("continue")
+        self.assertEqual(code, 1)
+        self.assertIn("VERIFICATION FAILED", err)
+        self.assertTrue(Path(".git/rebase-merge").exists())  # nothing proceeded
+        self.assertIn("Verification failed", (self.plan.parent / "conflict-report.md").read_text())
+        self.assertEqual(json.loads(self.state.read_text())["position"]["applied"],
+                         ["slice/feat-1"])  # slice 2 not applied
+
+    def test_continue_and_abort_dry_run_mid_conflict_change_nothing(self):
+        self.conflict()
+        before = g("for-each-ref"), g("status", "--porcelain")
+        for cmd, text in (("continue", "continue the restack at slice/feat-2"),
+                          ("abort", f"restore slice/feat-2 to {self.orig[2]}")):
+            code, out, _ = self.run_stack(cmd, "--dry-run")
+            self.assertEqual(code, 0)
+            self.assertIn(text, out)
+        self.assertEqual((g("for-each-ref"), g("status", "--porcelain")), before)
+        self.assertTrue(Path(".git/rebase-merge").exists())
+
+    def test_abort_restores_every_orig_sha(self):  # B16
+        self.conflict()  # slice 1 is already rebased when slice 2 stops
+        self.assertNotEqual(g("rev-parse", "slice/feat-1"), self.orig[1])
+        code, out, _ = self.run_stack("abort")
+        self.assertEqual(code, 0)
+        self.assertEqual({n: g("rev-parse", f"slice/feat-{n}") for n in (1, 2, 3)}, self.orig)
+        for branch in ("slice/feat-1", "slice/feat-2", "slice/feat-3"):
+            self.assertIn(branch, out)  # the restore list
+        self.assertFalse(self.state.exists())
+        self.assertFalse(Path(".git/rebase-merge").exists())
+        self.assertFalse((self.plan.parent / "conflict-report.md").exists())
+        self.assertFalse((self.plan.parent / ".stack-conflict").exists())
+        self.assertEqual(g("status", "--porcelain", "--untracked-files=no"), "")
+
+    def test_abort_after_completed_restack_unwinds_it(self):  # B16
+        self.fixup()
+        self.run_stack("restack", "--from", "2")
+        self.assertEqual(self.run_stack("abort")[0], 0)
+        self.assertEqual({n: g("rev-parse", f"slice/feat-{n}") for n in (2, 3)},
+                         {2: self.orig[2], 3: self.orig[3]})
