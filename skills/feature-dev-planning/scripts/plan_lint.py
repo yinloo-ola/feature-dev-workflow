@@ -3,7 +3,8 @@
 
 Enforces the contract between feature-dev-planning and slice-executor:
   - every slice card has the required fields
-  - slice 1 exists and is additive (the foundation)
+  - slice 1 exists and keeps deletes-existing: no (the foundation)
+  - deletes-existing is 'no' or 'yes — <what and why>'; mode: is legacy, advisory
   - depends-on references exist and the graph is acyclic
   - parallel slices (no edge between them) declare disjoint file sets
 
@@ -15,8 +16,15 @@ import sys
 from pathlib import Path
 
 SLICE_RE = re.compile(r"^### Slice (\d+):(.*)$")
-MODES = {"additive", "migrate", "contract"}
+DELIVER_RE = re.compile(r"^deliver:\s*(parallel|stacked)$", re.M)
+DELETES_RE = re.compile(r"^yes\s*—\s*(\S.*)$")  # captures the reason text
 REQUIRED = ("mode", "depends-on", "files", "tests", "card")
+
+
+def parse_deliver(text: str) -> str:
+    """Plan header 'deliver: parallel | stacked'; parallel when omitted."""
+    m = DELIVER_RE.search(text)
+    return m.group(1) if m else "parallel"
 
 
 def parse_plan(text: str):
@@ -34,6 +42,8 @@ def parse_plan(text: str):
             current = {
                 "title": m.group(2).strip(),
                 "mode": None,
+                "deletes": "no",  # raw deletes-existing value; default when omitted
+                "reason": None,  # text after 'yes —'
                 "deps": None,
                 "files": [],
                 "tests": [],
@@ -50,6 +60,9 @@ def parse_plan(text: str):
             field = key if key in ("files", "tests", "card") else None
             if key == "mode":
                 current["mode"] = rest
+            elif key == "deletes-existing":
+                m = DELETES_RE.match(rest)
+                current["deletes"], current["reason"] = rest, m and m.group(1)
             elif key == "depends-on":
                 deps = re.findall(r"\d+", rest)
                 current["deps"] = [int(d) for d in deps]
@@ -86,7 +99,9 @@ def main():
         print(f"FAIL: {e}")
         return 1
 
+    deliver = parse_deliver(path.read_text())
     errors = []
+    warnings = []
     if not slices:
         errors.append("no slice cards found (expected '### Slice N: title' blocks)")
 
@@ -94,8 +109,11 @@ def main():
         label = f"slice {num}"
         if not s["title"]:
             errors.append(f"{label}: missing title")
-        if s["mode"] not in MODES:
-            errors.append(f"{label}: mode must be one of {sorted(MODES)}, got {s['mode']!r}")
+        if s["mode"] is not None:
+            warnings.append(f"{label}: legacy mode field — v2 plans use deletes-existing")
+        if s["deletes"] != "no" and not s["reason"]:
+            errors.append(f"{label}: deletes-existing must be 'no' or 'yes — <what and why>' "
+                          f"(reason text required after 'yes —'), got {s['deletes']!r}")
         if s["deps"] is None:
             errors.append(f"{label}: missing depends-on (use '[]' if parallelizable)")
         if not s["files"]:
@@ -112,8 +130,8 @@ def main():
         if not any(s["card"]):
             errors.append(f"{label}: card is empty (fails the cold-start test)")
 
-    if 1 in slices and slices[1]["mode"] != "additive":
-        errors.append("slice 1 must be mode: additive (the foundation slice)")
+    if 1 in slices and slices[1]["deletes"] != "no":
+        errors.append("slice 1 is the foundation — deletes-existing must be no")
 
     # Note: deps must reference earlier slices (enforced above), which makes
     # cycles structurally impossible — no separate cycle check needed.
@@ -132,6 +150,8 @@ def main():
                     "without a dependency edge — add 'depends-on' or re-slice"
                 )
 
+    for w in warnings:
+        print(f"WARN: {w}")
     if errors:
         print(f"FAIL: {path}")
         for e in errors:
@@ -139,7 +159,9 @@ def main():
         return 1
     parallel = [n for n, s in slices.items() if not (s["deps"] or []) and n != 1]
     n_label = f"{len(slices)} slice" + ("" if len(slices) == 1 else "s")
-    print(f"OK: {path} — {n_label}; parallelizable immediately: "
+    n_del = sum(1 for s in slices.values() if s["reason"])
+    print(f"OK: {path} — {n_label}; deliver: {deliver}; "
+          f"deletes-existing: {n_del}; parallelizable immediately: "
           f"{sorted(parallel) if parallel else 'none (all sequenced)'}")
     return 0
 
