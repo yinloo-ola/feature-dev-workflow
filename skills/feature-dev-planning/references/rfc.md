@@ -51,9 +51,16 @@
    - Security and access: who may call or see each new path, what data is exposed,
      PII handling — depth proportional to the surface the feature adds
    - Alternatives: if necessary, consider two designs, one recommended with reasons
+   - Design dynamics (stress test): the seven questions of step 4, each answered in Design
+     or given a disposition here
+   - External contracts: every interface another team owns that the design consumes or
+     produces — owner, artifact, version/hash, and how it was verified. A consumed contract
+     is transcribed verbatim (dated) to `.specs/<feature>/04-contract-<consumer>.md` before
+     slicing; a later change to it is a material amendment
 
-   Each checklist item's disposition (answered where, assumed as what, defaulted how)
-   is recorded in the RFC's `## Coverage` section — the checklist leaves a trace.
+   Each checklist item's disposition (answered where, assumed as what, defaulted how,
+   deferred with what consequence) is recorded in the RFC's `## Coverage` section — the
+   checklist leaves a trace.
 
    **Stop condition:** the RFC may be drafted when no remaining unknown is *both*
    unresolvable by audit or default *and* material to the design. Everything unasked or
@@ -62,12 +69,52 @@
 4. **Draft the RFC** as `.specs/<feature>/02-rfc.md` using the template below. Keep it additive
    in spirit: the design should be shippable in stages, each stage leaving the system working.
 
-5. **Present and stop.** Show the user the RFC path, the assumptions taken, and the open
-   questions — they are the agenda for the approval conversation. Approval requires **zero
-   open questions**: each must be answered, or the user explicitly accepts its default and it
-   is promoted to an assumption (recorded as such). "Approved, defaults fine" is a valid,
-   complete approval; approving while questions remain unanswered is not. Do not begin
-   Phase 2 until approval is complete.
+   After drafting, run the **Design stress test**: walk the design against this fixed
+   adversarial list. Each item is answered in Design or given a Coverage disposition
+   ("not applicable — <why>" is a disposition; silence is not):
+
+   1. Restart/deploy mid-step — what soft state is lost, what rebuilds it
+   2. Missed/skipped ticks — catch-up path, max staleness, is it acceptable
+   3. Derived-artifact refresh — event vs periodic trigger, periodic cost at full scale
+   4. Step liveness — every background step has a wedge bound (lease/timeout/alarm)
+   5. Transport redelivery — ack window and the at-least-once consequence per queue
+   6. State enumeration — every variant state of the artifact has a producer
+   7. Window boundaries — first and last tick behavior of each stage
+
+5. **Run the reviewer pass.** Before presenting, spawn fresh-context reviewers on the RFC:
+   the EGM goldfish personas when that plugin is installed, otherwise fresh subagents
+   prompted with the seven stress-test questions as their checklist. Their findings join
+   the interrogation queue and get normal dispositions (step 6) — a finding is never
+   silently dropped. The EGM wiring is deferred pending a trial; until then the subagent
+   fallback is the supported path.
+
+6. **Walk the user through the RFC, then stop.** How depends on its length:
+
+   - **At or under ~400 lines:** present it whole — the RFC path, the assumptions taken,
+     and the open questions.
+   - **Longer:** a guided walkthrough. Post the section list as the agenda, then present
+     one section per turn, each turn ending with "edits for this section before the
+     next?". Apply requested edits to `02-rfc.md` in the same turn, show the revised
+     section, then move on. Never present the next section with edits outstanding.
+
+   Either way the review ends at Coverage + Assumptions and open questions — the agenda
+   for the approval conversation.
+
+   Approval requires **zero open questions**. Every open item resolves to one of three
+   dispositions:
+
+   - **answered** — the user's answer is written into the RFC.
+   - **accepted-as-assumption** — the user explicitly accepts the default and it is
+     promoted to an assumption (recorded as such).
+   - **deferred-as-scope** — a real deferral, recorded honestly instead of being
+     reclassified as an assumption. The record carries: what is deferred, its observable
+     consequence within this feature, and the trigger to revisit. Each deferral needs the
+     user's explicit sign-off of its consequence.
+
+   "Approved, defaults fine" is a valid, complete approval of the defaults — it does not
+   sign off deferrals; each deferral's consequence is confirmed by name. Approving while
+   questions remain unanswered is not approval. Do not begin Phase 2 until approval is
+   complete.
 
 ## RFC template
 
@@ -116,6 +163,8 @@ leaving the system working. This feeds Phase 2 slicing.
 ## Assumptions and open questions
 - Assumption: <what was adopted and why it's safe>
 - [ ] Open: <question> — <why it matters / default if unanswered>
+- Deferred: <what is deferred> — consequence: <observable effect within this feature> —
+  revisit when: <trigger>
 
 ## Coverage
 One line per interrogation checklist item, each with a disposition:
@@ -127,6 +176,8 @@ One line per interrogation checklist item, each with a disposition:
 - Observability: ...
 - Security and access: ...
 - Alternatives: see Alternatives considered
+- Design dynamics (stress test): <per question: answered — Design §n | not applicable — why>
+- External contracts: <none | owner, artifact, version/hash, verification — 04-contract-<consumer>.md>
 
 ## Change log
 Append-only. Every post-approval design change: date, what changed,
@@ -135,11 +186,14 @@ why, and re-approved (yes/no).
 
 Rules for the template:
 
-- Every assumption and open question carries a **default answer**. Unanswered questions must
-  not block slicing; the default is used and noted in the plan.
-- Assumptions are the audit- and default-resolved unknowns; open questions are the ones put
-  to the user. If an open question's answer arrives and contradicts an assumption, resolve
-  the contradiction before Phase 2 — not during execution.
+- Every assumption and open question carries a **default answer**, so the user can accept
+  it in one word. Assumptions are the audit- and default-resolved unknowns; open questions
+  are the ones put to the user.
+- Every open question leaves the approval conversation with one of three dispositions:
+  **answered**, **accepted-as-assumption**, or **deferred-as-scope** (what / observable
+  consequence within this feature / revisit trigger, signed off by the user). None stays
+  open. If an answer contradicts an assumption, resolve the contradiction before Phase 2 —
+  not during execution.
 - `Staging` is the bridge to Phase 2: each stage that can stand alone becomes one or more
   slices; stages that can't stand alone are sequencing constraints, not parallel work.
 - The stack needs no pin in an established repo — it's a fact of the target code, and the
