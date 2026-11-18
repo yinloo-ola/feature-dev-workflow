@@ -35,6 +35,7 @@ TEST_RE = re.compile(r"(^|/)(test_[^/]*\.py|conftest\.py)$|_test\.(go|py|rs)$|\.
 GENERATED_RE = re.compile(r"Code generated .* DO NOT EDIT\.")  # first two lines of file
 DELIVER_RE = re.compile(r"^deliver:\s*(parallel|stacked)$")  # matched per line, same grammar as plan_lint
 FIELD_RE = re.compile(r"^- (\w[\w-]*):(.*)$")  # top-level card field: column 0 only
+DEPS_RE = re.compile(r"^\[([^\]]*)\]$")  # bracketed list, same grammar as plan_lint
 DELETES_RE = re.compile(r"^yes\s*—\s*(\S.*)$")  # same grammar as plan_lint
 UNDECLARED_TEST = "undeclared test file edited — orchestrator to resolve (add to card or revert)"
 
@@ -88,7 +89,10 @@ def parse_plan(path):
             elif key == "deletes-existing":
                 c["deletes"] = rest
             elif key == "depends-on":
-                c["deps"] = [int(d) for d in re.findall(r"\d+", rest)]
+                b = DEPS_RE.match(re.sub(r"\s*#.*$", "", rest))  # trailing comment is not a dependency
+                if not b:
+                    fail([f"slice {current}: depends-on must be a bracketed list, got {rest!r}"])
+                c["deps"] = [int(d) for d in re.findall(r"\d+", b.group(1))]
             elif key in ("files", "tests") and rest:
                 c[key].append(rest)
             continue
