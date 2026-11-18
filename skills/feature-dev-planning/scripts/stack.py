@@ -326,7 +326,7 @@ def plan_lines(cmd, state, feature, start, restack_from=None):
                          f"{s['remote_sha'] or ''}")
             if why:
                 lines[-1] += f"  [skip: {why}]"
-        elif cmd == "abort" and s["orig_sha"]:
+        elif cmd == "abort" and s["orig_sha"] and branch not in state["position"].get("pushed", []):
             lines.append(f"restore {branch} to {s['orig_sha']}")
     if cmd == "continue":
         nxt = state["position"]["next_branch"]
@@ -612,7 +612,7 @@ def cmd_push(state, feature, sfile, gitdir, fresh, start, yes):
     print("\n".join(cost_report(state, feature, prs)))
     if not yes:
         try:
-            ok = input("Proceed with the force-push? [y/N] ").strip().lower() == "y"
+            ok = input("Proceed with the force-push? [y/N] ").strip().lower() in ("y", "yes")
         except (EOFError, RuntimeError):  # no stdin to ask: that is a NO, said plainly
             print("refusing to push without confirmation (stdin closed) - pass --yes",
                   file=sys.stderr)

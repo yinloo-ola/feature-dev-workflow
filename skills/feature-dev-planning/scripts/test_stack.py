@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -694,6 +695,60 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(self.run_stack("abort", "--dry-run", "--force")[0], 0)  # --force previews it
 
 
+    # --- slice 18: modify/delete brief (item 3) and a second conflicting commit (item 5) ---
+
+    def rebuild(self, name, text):
+        """Replace the chain with a fresh one on main: `name` holds `text` in the base."""
+        g("switch", "-q", "main")
+        for n in (1, 2, 3):
+            g("branch", "-q", "-D", f"slice/feat-{n}")
+        commit(name, text, "base file")
+        g("switch", "-q", "-c", "slice/feat-1")
+
+    def test_s18_item3_modify_delete_conflict_writes_the_decision_brief(self):  # r3s_report_moddel_and
+        self.rebuild("d.txt", "1\n2\n3\n")
+        g("rm", "-q", "d.txt")  # the slice deletes a file ...
+        g("commit", "-q", "-m", "slice 1 deletes d")
+        g("switch", "-q", "-c", "slice/feat-2")
+        g("commit", "-q", "--allow-empty", "-m", "slice 2")
+        g("switch", "-q", "main")
+        commit("d.txt", "1\n2\n3\n4\n", "main modifies d")  # ... that main modified
+        code, _, err = self.run_stack("restack", "--from", "1")
+        self.assertEqual(code, 1)
+        self.assertIn("CONFLICT: restack stopped at slice 1", err)
+        report = (self.plan.parent / "conflict-report.md").read_text()
+        self.assertIn("- d.txt: modify/delete \u2014 decision required",
+                      report.split("## 5.")[1].split("## 6.")[0])
+        self.assertIn("(absent: theirs)", report)
+
+    def test_s18_item5_second_conflicting_commit_refreshes_the_brief(self):  # r3s_cont_multi_conflict
+        lines = lambda **kw: "".join(f"{kw.get(f'l{i}', f'l{i}')}\n" for i in range(1, 10))  # noqa: E731
+        self.rebuild("d.txt", lines())
+        commit("d.txt", lines(l1="l1-s1"), "slice 1")
+        g("switch", "-q", "-c", "slice/feat-2")
+        commit("d.txt", lines(l1="l1-s1", l5="l5-a"), "slice 2: A edits l5")
+        commit("d.txt", lines(l1="l1-s1", l5="l5-a", l8="l8-b"), "slice 2: B edits l8")
+        g("switch", "-q", "main")
+        commit("d.txt", lines(l5="l5-main", l8="l8-main"), "main edits both")
+        self.assertEqual(self.run_stack("restack", "--from", "1")[0], 1)
+        report = lambda: (self.plan.parent / "conflict-report.md").read_text()  # noqa: E731
+        position = lambda: [x for x in report().splitlines() if x.startswith("- commit being applied")][0]  # noqa: E731,E501
+        self.assertIn("slice 2: A edits l5", position())
+        Path("d.txt").write_text(lines(l1="l1-s1", l5="l5-res", l8="l8-main"))
+        g("add", "d.txt")
+        code, _, err = self.run_stack("continue")
+        self.assertEqual(code, 1)  # the next commit conflicts too: stopped, not carried on
+        self.assertIn("CONFLICT: restack stopped at slice 2", err)
+        self.assertIn("slice 2: B edits l8", position())  # refreshed, not the stale first brief
+        self.assertTrue(Path(".git/rebase-merge").exists())
+        state = json.loads(self.state.read_text())["position"]
+        self.assertEqual(state, {"next_branch": "slice/feat-2", "applied": ["slice/feat-1"]})
+        Path("d.txt").write_text(lines(l1="l1-s1", l5="l5-res", l8="l8-res"))
+        g("add", "d.txt")
+        self.assertEqual(self.run_stack("continue")[0], 0)  # and the second resolution finishes it
+        self.assertFalse((self.plan.parent / "conflict-report.md").exists())
+
+
 class OldBaseTest(unittest.TestCase):
     """Slices 2 and 3 were built on slice 1; slice 1 is then amended."""
 
@@ -1104,6 +1159,108 @@ class PushTest(unittest.TestCase):
                                      "slice/feat-2": pr(2, "slice/feat-1")}, "status")
         self.assertEqual(code, 0)
         self.assertNotIn("PR base", out)
+
+
+    # --- slice 18: push prompt (item 1), abort --dry-run after a push (item 2) ---
+
+    def answer(self, text):
+        """`stack.py push` (no --yes) in a real subprocess whose stdin is the text typed."""
+        d = self.gh_bin('echo "no pull requests found" >&2; exit 1')
+        return subprocess.run([sys.executable, stack.__file__, "push", str(self.plan)],
+                              input=text, capture_output=True, text=True,
+                              env={**os.environ, "PATH": f"{d}{os.pathsep}{os.environ['PATH']}"})
+
+    def test_s18_item1_only_y_or_yes_proceeds_anything_else_declines(self):  # r3s_prompt_default_yes
+        self.restacked()
+        before = [self.remote(n) for n in (1, 2, 3)]
+        for text in ("\n", "maybe\n", "n\n"):
+            with self.subTest(text=text):
+                r = self.answer(text)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("push declined", r.stderr)
+                self.assertEqual([self.remote(n) for n in (1, 2, 3)], before)
+
+    def proceeds(self, text):
+        self.restacked()
+        r = self.answer(text)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([self.remote(n) for n in (1, 2, 3)], [self.local(n) for n in (1, 2, 3)])
+
+    def test_s18_item1_y_proceeds(self):
+        self.proceeds("y\n")
+
+    def test_s18_item1_YES_proceeds(self):
+        self.proceeds("YES\n")
+
+    def test_s18_item1_padded_yes_proceeds(self):
+        self.proceeds(" yes \n")
+
+    def test_s18_item2_abort_dry_run_lists_what_a_real_abort_restores(self):
+        self.restacked()
+        replies = {"slice/feat-2": '{"number":7,"state":"MERGED"}',
+                   "slice/feat-3": '{"number":8,"state":"MERGED"}'}
+        self.assertEqual(self.with_gh(replies, "push", "--yes")[0], 0)  # only slice 1 is published
+        self.assertEqual(json.loads(self.state.read_text())["position"]["pushed"], ["slice/feat-1"])
+        code, out, _ = self.run_stack("abort", "--dry-run")
+        self.assertEqual(code, 0)
+        dry = dict(re.findall(r"^  restore (\S+) to (\w+)$", out, re.M))
+        code, out, _ = self.run_stack("abort")
+        self.assertEqual(code, 0)
+        real = {b: s for b, s in re.findall(r"^  (\S+) -> (\w+)$", out, re.M)}
+        self.assertEqual(sorted(real), ["slice/feat-2", "slice/feat-3"])  # not the published slice 1
+        self.assertEqual(sorted(dry), sorted(real))
+        self.assertEqual({b: s[:7] for b, s in dry.items()}, real)
+
+
+HYPHEN = CHAIN.replace("# Plan: feat", "# Plan: slice-execution-v2")
+
+
+class HyphenatedFeatureTest(unittest.TestCase):
+    """Slice 18 item 4: a feature whose own name contains hyphens (slice-execution-v2)."""
+
+    run_stack = StackTest.run_stack
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        self.plan = root / "03-plan.md"
+        self.plan.write_text(HYPHEN)
+        repo = root / "repo"
+        repo.mkdir()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(repo)
+        g("init", "-q", "-b", "main")
+        for k, v in (("user.name", "t"), ("user.email", "t@t"), ("commit.gpgsign", "false")):
+            g("config", k, v)
+        commit("a.txt", "alpha\nbeta\ngamma\n", "base")
+        for n, (name, text) in enumerate((("a.txt", "alpha-1\nbeta\ngamma\n"),
+                                          ("a.txt", "alpha-1\nbeta\ngamma-2\n"),
+                                          ("b.txt", "b\n")), 1):
+            g("switch", "-q", "-c", f"slice/slice-execution-v2-{n}")
+            commit(name, text, f"slice {n}")
+        g("switch", "-q", "main")
+        commit("a.txt", "alpha\nbeta\ngamma-main\n", "main moves gamma")
+        patcher = mock.patch("stack.shutil.which", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_dry_run_conflict_continue_and_cost_report_do_not_crash(self):  # r3s_cost_done_split
+        code, out, _ = self.run_stack("restack", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("rebase slice/slice-execution-v2-2 onto slice/slice-execution-v2-1", out)
+        code, _, err = self.run_stack("restack", "--from", "1")
+        self.assertEqual((code, "CONFLICT: restack stopped at slice 2" in err), (1, True))
+        self.assertIn("branch: slice/slice-execution-v2-2",
+                      (self.plan.parent / "conflict-report.md").read_text())
+        Path("a.txt").write_text("alpha-1\nbeta\nresolved\n")
+        g("add", "a.txt")
+        code, out, _ = self.run_stack("continue", "--test-cmd", "true")  # branch number from the name
+        self.assertEqual(code, 0)
+        self.assertIn("rebased slice/slice-execution-v2-3", out)
+        code, out, _ = self.run_stack("push", "--dry-run")  # cost report parses the applied list
+        self.assertEqual(code, 0)
+        self.assertIn("branches restacked: 1..3", out)
 
 
 class ClassifyTest(unittest.TestCase):
