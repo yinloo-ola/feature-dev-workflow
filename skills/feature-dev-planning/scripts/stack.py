@@ -6,11 +6,13 @@ Usage: stack.py {status,restack,continue,abort,push} <path-to-03-plan.md> [--dry
 status prints each slice branch in stack order with its local/remote SHA and PR.
 restack --from n replays branches n..N onto their parents; on a conflict it stops,
 writes conflict-report.md beside the plan and leaves the rebase in progress.
-continue finishes the stopped branch (tree resolved + tests green) and carries on;
+continue finishes the stopped branch (tree resolved, no conflict markers, tests green:
+--test-cmd "<shell command>" overrides discovery) and carries on;
 abort restores every branch to its recorded SHA (--force even over later commits). push prints the cost report, asks to
-proceed (--yes skips), then force-pushes each changed branch with a lease on the remote
-SHA captured at restack time; push --from n restacks first. Every mutating command
-supports --dry-run.
+proceed (--yes skips; a closed stdin refuses), then force-pushes every changed branch in one
+atomic command, each with a lease on the remote SHA captured at restack time; push --from n
+restacks first. A finished restack, push or abort switches back to the starting branch.
+Every mutating command supports --dry-run.
 Exit 1 also means a restack stopped (conflict or red tests): read conflict-report.md.
 Run from inside the repo checkout. Exit 0 = ok, 1 = refused.
 """
@@ -28,6 +30,7 @@ from pathlib import Path
 SLICE_RE = re.compile(r"^### Slice (\d+):")
 MUTATING = ("restack", "continue", "abort", "push")
 RESUMING = ("continue", "abort")  # run mid-conflict: tree is dirty, a rebase is open
+MARKER_RE = re.compile(r"^(<{7}|={7}|>{7})( |$)")
 IMPORT_RE = re.compile(r"\s*(import\s|from\s+\S+\s+import\s|#include\b|use\s|"
                        r"(const|let|var)\s.*=\s*require\()")
 
@@ -91,7 +94,54 @@ def capture(plan, base, feature, order, start):
         } for n in order},
         "position": {"next_branch": f"slice/{feature}-{start}", "applied": []},
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "start_branch": git("symbolic-ref", "--short", "-q", "HEAD"),
+        "start_worktree": str(Path(git("rev-parse", "--show-toplevel")).resolve()),
     }
+
+
+def restore_head(state):
+    """Switch back to the branch the first mutation started on: same worktree, clean tree."""
+    b = state.get("start_branch")  # absent in a state recorded before slice 14
+    if (b and git("symbolic-ref", "--short", "-q", "HEAD") != b
+            and state.get("start_worktree") == str(Path(git("rev-parse", "--show-toplevel")).resolve())
+            and not git("status", "--porcelain", "--untracked-files=no")):
+        run("switch", "-q", b)
+
+
+def unmerged():
+    """Paths with unresolved conflicts, NUL-delimited so non-ASCII names survive."""
+    return [f for f in run("diff", "--name-only", "--diff-filter=U", "-z").stdout.split("\0") if f]
+
+
+def marker_files(diff):
+    """Files with an added line that is a conflict marker, from git diff -U0 output."""
+    hit, cur = set(), None
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            cur = line[4:].removeprefix("b/")
+        elif line.startswith("+") and MARKER_RE.match(line[1:]):
+            hit.add(cur)
+    return hit
+
+
+def create_state(sfile, state):
+    """Create the state file exclusively: of two concurrent restacks only one wins."""
+    try:
+        with open(sfile, "x") as f:
+            f.write(json.dumps(state, indent=2) + "\n")
+    except FileExistsError:
+        die_recorded(sfile)
+
+
+def die_recorded(sfile):
+    die(f"a restack is already recorded in {sfile} — finish it (stack.py continue) "
+        "or restore the branches and clear it (stack.py abort), then re-run")
+
+
+def clear_artifacts(plan_path):
+    base = Path(plan_path).parent
+    (base / "conflict-report.md").unlink(missing_ok=True)
+    shutil.rmtree(base / ".stack-conflict", ignore_errors=True)
 
 
 def rebasing(gitdir):
@@ -194,7 +244,13 @@ def pr_state(branch):
         return None
     r = subprocess.run(["gh", "pr", "view", branch, "--json", "number,state"],
                        capture_output=True, text=True)
-    return json.loads(r.stdout) if r.returncode == 0 else None
+    if r.returncode == 0:
+        return json.loads(r.stdout)
+    err = (r.stderr or r.stdout).strip()
+    if "no pull requests found" not in err:  # a real failure, not just "no PR yet"
+        print(f"gh: {err.splitlines()[0] if err else f'exited {r.returncode}'} - merged-PR "
+              f"protection unavailable for {branch}", file=sys.stderr)
+    return None
 
 def push_skip(branch, s, pr):
     """Why branch needs no push, or None."""
@@ -206,8 +262,18 @@ def push_skip(branch, s, pr):
     if tip == s["remote_sha"]:
         return "tip equals remote"
 
-def cost_report(state, feature, prs):
-    """What a push costs: restacked range, patches range-diff says changed, PRs that move."""
+def push_set(state, feature, prs):
+    """[(branch, remote sha or None, tip)] — exactly what one push would send."""
+    pushed = state["position"].get("pushed", [])
+    out = []
+    for n in state["order"]:
+        b, s = f"slice/{feature}-{n}", state["branches"][str(n)]
+        if b not in pushed and not push_skip(b, s, prs.get(b)):
+            out.append((b, s["remote_sha"], git("rev-parse", f"refs/heads/{b}")))
+    return out
+
+def cost_report(state, feature, prs, show_set=True):
+    """What a push costs: restacked range, patches range-diff says changed, the push set, PRs that move."""
     order, shas = state["order"], state["branches"]
     done = [int(b.rsplit("-", 1)[1]) for b in state["position"]["applied"]]
     out = ["cost report:", "  branches restacked: "
@@ -225,12 +291,21 @@ def cost_report(state, feature, prs):
         pr = prs.get(branch)
         if pr and pr["state"] == "OPEN" and not push_skip(branch, s, pr):
             moving.append(f"#{pr['number']} ({branch})")
+    if show_set:
+        sent = push_set(state, feature, prs)
+        out.append("  push set:" + ("" if sent else " none"))
+        out += [f"    {b}: {old[:7] if old else 'new branch'} -> {tip[:7]}"
+                + ("" if b in state["position"]["applied"] else " (not restacked in this run)")
+                for b, old, tip in sent]
     out += ["  PRs whose heads will move: " + (", ".join(moving) or "none (or gh absent)"),
             "  reviewers of moved heads must re-review"]
     return out
 
-def plan_lines(cmd, state, feature, start):
-    """The actions `cmd` would take, plus its cost line — what --dry-run prints."""
+def plan_lines(cmd, state, feature, start, restack_from=None):
+    """The actions `cmd` would take, plus its cost line — what --dry-run prints.
+
+    restack_from: push --from n on a fresh state; the restack is not simulated.
+    """
     order, base, shas = state["order"], state["base"], state["branches"]
     todo = order[order.index(start):] if cmd == "restack" else order
     lines = []
@@ -242,6 +317,8 @@ def plan_lines(cmd, state, feature, start):
         if cmd == "restack":
             lines.append(f"rebase {branch} onto {parent}"
                          + (f" (base_old {(fork_base(parent, branch) or "?")[:7]})" if s["orig_sha"] else ""))
+        elif cmd == "push" and restack_from is not None and n >= restack_from:
+            continue  # the restack would rewrite it: its push line is unknowable until then
         elif cmd == "push":
             prs[branch] = pr_state(branch)
             why = push_skip(branch, s, prs[branch])
@@ -260,7 +337,10 @@ def plan_lines(cmd, state, feature, start):
     lines.append(f"cost: {len(todo)} branch(es) in play; {pushed} already pushed — "
                  "a moved head needs a force-push and a re-review of its PR")
     if cmd == "push":
-        lines += cost_report(state, feature, prs)
+        if restack_from is not None:
+            lines.append(f"restack {restack_from}..{order[-1]} would run first; "
+                         "push set is computed after it")
+        lines += cost_report(state, feature, prs, show_set=restack_from is None)
     return lines
 
 
@@ -281,15 +361,20 @@ def parent_of(state, feature, n):
         "merge-base", state["base"], shas[str(n)]["orig_sha"])
 
 
-def discover_test_cmd(root):
-    """First of: Makefile test target, package.json test script, go vet + go test."""
+def discover_test_cmd(root, override=None):
+    """The shell command that runs the tests: --test-cmd, else the first marker file found."""
+    if override:
+        return override
     mk, pkg = root / "Makefile", root / "package.json"
     if mk.is_file() and re.search(r"^test:", mk.read_text(), re.M):
-        return ["make", "test"]
+        return "make test"
     if pkg.is_file() and "test" in json.loads(pkg.read_text()).get("scripts", {}):
-        return ["npm", "test"]
-    if (root / "go.mod").is_file():
-        return ["sh", "-c", "go vet ./... && go test ./..."]
+        return "npm test"
+    for marker, cmd in (("go.mod", "go vet ./... && go test ./..."), ("Cargo.toml", "cargo test")):
+        if (root / marker).is_file():
+            return cmd
+    if any((root / f).is_file() for f in ("pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini")):
+        return "python3 -m pytest -q"
     return None
 
 
@@ -328,7 +413,7 @@ def conflict_report(state, feature, n, plan_path, script):
     cited = sorted(set(re.findall(r"\bB\d+\b", card)), key=lambda b: int(b[1:]))
     art = Path(plan_path).parent / ".stack-conflict" / str(n)
     art.mkdir(parents=True, exist_ok=True)
-    files = (git("diff", "--name-only", "--diff-filter=U") or "").splitlines()
+    files = unmerged()
     out = [f"# Conflict report — slice {n}", "",
            "## 1. Position", f"- branch: {branch} (slice {n})",
            f"- commit being applied: {sha[:7]} {subject}", f"- parent branch: {parent}", "",
@@ -410,7 +495,7 @@ def replay(state, feature, sfile, gitdir, todo):
         save(sfile, state)
         r = run("rebase", "--onto", parent, old_tip, branch)
         if r.returncode:
-            if git("diff", "--name-only", "--diff-filter=U") and rebasing(gitdir):
+            if unmerged() and rebasing(gitdir):
                 return stop(state, feature, n, state["plan_path"])
             die(f"git rebase of {branch} failed: {r.stderr.strip()} — fix that, then "
                 "stack.py abort (restores every branch) or re-run continue")
@@ -421,48 +506,59 @@ def replay(state, feature, sfile, gitdir, todo):
     state["position"]["next_branch"] = None
     save(sfile, state)
     print("restack complete")
+    restore_head(state)
     return 0
 
 
-def cmd_continue(state, feature, sfile, gitdir):
+def cmd_continue(state, feature, sfile, gitdir, test_cmd=None):
     branch = state["position"]["next_branch"]
     if not branch or not rebasing(gitdir):
         die("no conflicted rebase to continue — the restack is complete (stack.py push) "
             "or stopped without a rebase; stack.py abort restores every branch")
     n = int(branch.rsplit("-", 1)[1])
-    left = git("diff", "--name-only", "--diff-filter=U")
-    if left or run("diff", "--check").returncode or run("diff", "--cached", "--check").returncode:
-        die(f"unresolved conflicts or conflict markers{': ' + left.replace(chr(10), ', ') if left else ''}"
-            " — edit the files, git add them, then re-run continue")
+    if run("ls-files", "-u").stdout.strip():
+        die(f"unresolved conflicts: {', '.join(unmerged())} — edit the files, git add them, "
+            "then re-run continue")
+    # added lines only: trailing whitespace in a resolution is the author's business
+    diff = "".join(run("-c", "core.quotepath=off", "diff", "--no-color", "-U0", *x).stdout
+                   for x in ((), ("--cached",)))
+    if marker_files(diff):
+        die(f"conflict markers remain in {', '.join(sorted(marker_files(diff)))} — edit the "
+            "files, git add them, then re-run continue")
     root = Path(git("rev-parse", "--show-toplevel"))
-    cmd = discover_test_cmd(root)
+    cmd = discover_test_cmd(root, test_cmd)
     if not cmd:
-        die("no test command found — add a Makefile 'test' target, a package.json 'test' "
-            "script or a go.mod (verification.md), then re-run continue")
-    t = subprocess.run(cmd, cwd=root, capture_output=True, text=True, errors="replace")
+        die("no test command found - pass --test-cmd \"<shell command>\" (or add a Makefile "
+            "'test' target, a package.json 'test' script, go.mod, Cargo.toml or pytest config)")
+    t = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True,
+                       errors="replace", stdin=subprocess.DEVNULL)
     if t.returncode:
         tail = "\n".join((t.stdout + t.stderr).splitlines()[-40:])
         report = Path(state["plan_path"]).parent / "conflict-report.md"
-        report.write_text(f"# Verification failed — slice {n}\n\n`{' '.join(cmd)}` exited "
+        report.write_text(f"# Verification failed — slice {n}\n\n`{cmd}` exited "
                           f"{t.returncode} on the resolved tree:\n```\n{tail}\n```\n\n"
                           "Fix the code, git add it, then re-run stack.py continue "
                           "(or stack.py abort).\n")
-        print(f"VERIFICATION FAILED: {' '.join(cmd)} exited {t.returncode}; see {report}. "
+        print(f"VERIFICATION FAILED: {cmd} exited {t.returncode}; see {report}. "
               "The rebase is still in progress.", file=sys.stderr)
         return 1
-    print(f"tests green: {' '.join(cmd)}")
+    print(f"tests green: {cmd}")
     r = run("rebase", "--continue", env={**os.environ, "GIT_EDITOR": "true"})
     if r.returncode:
-        if git("diff", "--name-only", "--diff-filter=U") and rebasing(gitdir):
+        if unmerged() and rebasing(gitdir):
             return stop(state, feature, n, state["plan_path"])  # next commit conflicts too
         die(f"git rebase --continue failed: {r.stderr.strip()}")
     state["position"]["applied"].append(branch)
     state["branches"][str(n)]["new_sha"] = git("rev-parse", f"refs/heads/{branch}")
     order = state["order"]
-    return replay(state, feature, sfile, gitdir, order[order.index(n) + 1:])
+    code = replay(state, feature, sfile, gitdir, order[order.index(n) + 1:])
+    if code == 0:  # the whole restack is done: the brief and its artifacts are stale
+        clear_artifacts(state["plan_path"])
+    return code
 
 
-def cmd_abort(state, feature, sfile, gitdir, force):
+def abort_plan(state, feature, force):
+    """(branches to restore, branches with later commits); refuses the latter without force."""
     pushed = state["position"].get("pushed", [])  # branches already published stay put
     todo = [(f"slice/{feature}-{n}", s["orig_sha"], s.get("new_sha"))
             for n, s in ((n, state["branches"][str(n)]) for n in state["order"])
@@ -476,6 +572,11 @@ def cmd_abort(state, feature, sfile, gitdir, force):
         die("; ".join(f"{b} has commits not in the recorded restack ({cur})" for b, cur in lost)
             + "; abort would discard them - re-run with --force to restore anyway "
             "(the tip stays in the reflog)")
+    return todo, lost
+
+
+def cmd_abort(state, feature, sfile, gitdir, force):
+    todo, lost = abort_plan(state, feature, force)
     if rebasing(gitdir) and run("rebase", "--abort").returncode:
         die("git rebase --abort failed — run it by hand, then re-run abort")
     head = git("symbolic-ref", "--short", "-q", "HEAD")
@@ -488,11 +589,10 @@ def cmd_abort(state, feature, sfile, gitdir, force):
             git("reset", "--hard", "-q", sha)  # checked out here: move the tree along
         else:
             git("update-ref", "-m", "stack-abort", f"refs/heads/{branch}", sha)
-    base = Path(state["plan_path"]).parent
-    (base / "conflict-report.md").unlink(missing_ok=True)
-    shutil.rmtree(base / ".stack-conflict", ignore_errors=True)
+    clear_artifacts(state["plan_path"])
     sfile.unlink()
     print("abort: restored" + "".join(f"\n  {b} -> {s[:7]}" for b, s, _ in todo))
+    restore_head(state)
     return 0
 
 def cmd_push(state, feature, sfile, gitdir, fresh, start, yes):
@@ -500,45 +600,51 @@ def cmd_push(state, feature, sfile, gitdir, fresh, start, yes):
         if not start:
             die("no completed restack recorded — run stack.py restack <plan> --from <n> "
                 "first, or push --from <n> to restack and push in one step")
-        save(sfile, state)
+        create_state(sfile, state)
         if replay(state, feature, sfile, gitdir, state["order"][state["order"].index(start):]):
             return 1  # stopped on a conflict: resolve, stack.py continue, then push
     elif start:
         die("a restack is already recorded — run push without --from")
     elif state["position"]["next_branch"]:
         die("the restack is unfinished — stack.py continue (or abort), then push")
-    shas, pushed = state["branches"], state["position"].setdefault("pushed", [])
+    shas, pushed = state["branches"], state["position"].get("pushed", [])
     prs = {f"slice/{feature}-{n}": pr_state(f"slice/{feature}-{n}") for n in state["order"]}
     print("\n".join(cost_report(state, feature, prs)))
     if not yes:
         try:
             ok = input("Proceed with the force-push? [y/N] ").strip().lower() == "y"
-        except EOFError:
-            ok = False
+        except (EOFError, RuntimeError):  # no stdin to ask: that is a NO, said plainly
+            print("refusing to push without confirmation (stdin closed) - pass --yes",
+                  file=sys.stderr)
+            return 1
         if not ok:
             print("push declined — nothing pushed (--yes skips this prompt)", file=sys.stderr)
             return 1
-    count = 0
-    for n in state["order"]:
-        branch, s = f"slice/{feature}-{n}", shas[str(n)]
-        why = "already pushed" if branch in pushed else push_skip(branch, s, prs[branch])
-        if why:
-            print(f"skip {branch}: {why}")
-            continue
-        r = run("push", f"--force-with-lease=refs/heads/{branch}:{s['remote_sha'] or ''}",
-                "origin", branch)
+    sent = push_set(state, feature, prs)
+    if sent:  # one atomic command: every lease holds or nothing moves
+        r = run("push", "--atomic",
+                *[f"--force-with-lease=refs/heads/{b}:{old or ''}" for b, old, _ in sent],
+                "origin", *[b for b, _, _ in sent])
         if r.returncode:
-            what = ("origin/" + branch + " moved since the restack captured it — a concurrent "
-                    "push? Fetch and inspect it") if "stale info" in r.stderr else "push failed"
-            print(f"REJECTED: {what}. {r.stderr.strip()}\nNothing after {branch} was pushed; "
-                  "re-run push once resolved, or stack.py abort restores the unpushed branches.",
-                  file=sys.stderr)
+            m = re.search(r"\[rejected\]\s+\S+ -> (\S+)\s+\(stale info\)", r.stderr)
+            print((f"push rejected - nothing was pushed (atomic). origin changed since the "
+                   f"restack: inspect with git fetch && git log origin/{m.group(1)}, then "
+                   "stack.py abort and restack") if m else
+                  "push failed - nothing was pushed (atomic)", f"\n{r.stderr.strip()}",
+                  file=sys.stderr, sep="")
             return 1
-        pushed.append(branch)
+        state["position"]["pushed"] = pushed + [b for b, _, _ in sent]
         save(sfile, state)
-        count += 1
-        print(f"pushed {branch} -> {git('rev-parse', branch)[:7]}")
-    print(f"push complete: {count} pushed, {len(state['order']) - count} skipped")
+    names = {b for b, _, _ in sent}
+    for n in state["order"]:
+        branch = f"slice/{feature}-{n}"
+        if branch in names:
+            print(f"pushed {branch} -> {git('rev-parse', branch)[:7]}")
+        else:
+            print(f"skip {branch}: " + ("already pushed" if branch in pushed
+                                        else push_skip(branch, shas[str(n)], prs[branch])))
+    print(f"push complete: {len(sent)} pushed, {len(state['order']) - len(sent)} skipped")
+    restore_head(state)
     return 0
 
 def main(argv=None):
@@ -550,6 +656,8 @@ def main(argv=None):
         sp.add_argument("--dry-run", action="store_true", help="mutate nothing")
         if name == "restack":
             sp.add_argument("--from", dest="start", type=int, help="first slice")
+        if name == "continue":
+            sp.add_argument("--test-cmd", help="shell command that runs the tests")
         if name == "abort":
             sp.add_argument("--force", action="store_true",
                             help="restore even over commits made after the restack")
@@ -578,8 +686,7 @@ def main(argv=None):
         die(f"no restack in progress — nothing to {args.cmd}; start one with "
             "stack.py restack <plan> --from <n>")
     if args.cmd == "restack" and sfile.exists() and not args.dry_run:
-        die(f"a restack is already recorded in {sfile} — finish it (stack.py continue) "
-            "or restore the branches and clear it (stack.py abort), then re-run")
+        die_recorded(sfile)
     # An existing state file holds the original SHAs abort restores: never overwrite.
     fresh = not sfile.exists()
     if fresh:
@@ -595,19 +702,22 @@ def main(argv=None):
     refuse_foreign_checkouts([f"slice/{feature}-{n}" for n in scope])
     if args.dry_run:
         print(f"dry-run: {args.cmd} — nothing is changed")
-        for line in plan_lines(args.cmd, state, feature, start):
+        if args.cmd == "abort":
+            abort_plan(state, feature, args.force)  # previews the lost-commits refusal
+        for line in plan_lines(args.cmd, state, feature, start,
+                               args.start if args.cmd == "push" and fresh else None):
             print(f"  {line}")
         return 0
     if args.cmd == "push":
         return cmd_push(state, feature, sfile, Path(gitdir), not sfile.exists(),
                         args.start, args.yes)
-    if not sfile.exists():
-        sfile.write_text(json.dumps(state, indent=2) + "\n")
+    if fresh:
+        create_state(sfile, state)
     gitdir = Path(gitdir)
     if args.cmd == "restack":
         return replay(state, feature, sfile, gitdir, order[order.index(start):])
     if args.cmd == "continue":
-        return cmd_continue(state, feature, sfile, gitdir)
+        return cmd_continue(state, feature, sfile, gitdir, args.test_cmd)
     return cmd_abort(state, feature, sfile, gitdir, args.force)
 
 

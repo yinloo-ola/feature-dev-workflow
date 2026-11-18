@@ -64,7 +64,8 @@ class StackTest(unittest.TestCase):
 
     def run_stack(self, *argv):
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch("sys.stdin", io.StringIO()):  # EOF, never the terminal
             try:
                 code = stack.main([*argv[:1], str(self.plan), *argv[1:]])
             except SystemExit as e:
@@ -105,6 +106,8 @@ class StackTest(unittest.TestCase):
                 "3": {"orig_sha": None, "remote_sha": None},
             },
             "position": {"next_branch": None, "applied": []},
+            "start_branch": "main",  # item 8: HEAD when the first mutation began
+            "start_worktree": str(Path.cwd()),
         })
         # A second run must not overwrite the recorded original SHAs.
         g("commit", "-q", "--allow-empty", "-m", "moved")
@@ -432,7 +435,8 @@ class LifecycleTest(unittest.TestCase):
 
     def test_abort_refuses_when_a_branch_is_dirty_on_the_current_worktree(self):  # item 4
         self.fixup()
-        self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)  # HEAD: slice/feat-3
+        self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)
+        g("switch", "-q", "slice/feat-3")  # restack returns HEAD to slice/feat-1 (item 8)
         restacked = self.tips()
         Path("b.txt").write_text("edited\n")
         code, _, err = self.run_stack("abort")
@@ -445,6 +449,10 @@ class LifecycleTest(unittest.TestCase):
     def test_abort_on_a_clean_checked_out_branch_resets_the_tree(self):  # item 4
         self.fixup()
         self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)
+        g("switch", "-q", "slice/feat-3")  # restack returns HEAD to slice/feat-1 (item 8)
+        state = json.loads(self.state.read_text())
+        del state["start_branch"]  # a state recorded before slice 14: HEAD is left where it is
+        self.state.write_text(json.dumps(state))
         self.assertTrue(Path("c.txt").exists())  # slice 3 carries slice 1's fixup
         self.assertEqual(self.run_stack("abort")[0], 0)
         self.assertEqual(g("symbolic-ref", "--short", "HEAD"), "slice/feat-3")
@@ -482,6 +490,142 @@ class LifecycleTest(unittest.TestCase):
                     self.assertIn(f"--from {bad}: no such slice (plan has 1, 2, 3)", err)
                     self.assertFalse(self.state.exists())
                     self.assertEqual(self.tips(), self.orig)
+
+    # --- slice 14: continue checks, HEAD, artifacts, non-ASCII, state creation (items 6-13) ---
+
+    def resolve(self, text):
+        Path("a.txt").write_text(text)
+        g("add", "a.txt")
+
+    def test_continue_refuses_staged_or_unstaged_conflict_markers(self):  # item 6
+        self.conflict()
+        marked = "alpha-1\nbeta\n<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\n"
+        for staged in (True, False):
+            with self.subTest(staged=staged):
+                self.resolve("alpha-1\nbeta\nresolved\n")
+                Path("a.txt").write_text(marked)  # worktree differs from the index
+                if staged:
+                    g("add", "a.txt")
+                code, _, err = self.run_stack("continue")  # Makefile is green
+                self.assertEqual(code, 1)
+                self.assertIn("conflict markers remain in a.txt", err)
+                self.assertTrue(Path(".git/rebase-merge").exists())
+                self.assertEqual(self.marker.exists(), False)  # refused before running tests
+
+    def test_continue_accepts_trailing_whitespace_in_the_resolution(self):  # item 6
+        self.conflict()
+        self.resolve("alpha-1\nbeta\nresolved   \n")
+        code, out, _ = self.run_stack("continue")
+        self.assertEqual(code, 0)
+        self.assertIn("rebased slice/feat-3", out)
+
+    def test_marker_scan_matches_only_real_markers_on_added_lines(self):  # item 6
+        diff = lambda *lines: "+++ b/f.txt\n" + "".join(f"+{x}\n" for x in lines)  # noqa: E731
+        for line, hit in (("<<<<<<< HEAD", True), ("=======", True), (">>>>>>> theirs", True),
+                          ("<<<<<<<", True), ("<<<<<<<<", False), ("<<<<<< six", False),
+                          ("a ======= b", False), ("======== eight", False)):
+            with self.subTest(line=line):
+                self.assertEqual(stack.marker_files(diff(line)), {"f.txt"} if hit else set())
+        self.assertEqual(stack.marker_files("+++ b/f.txt\n-=======\n ======= ctx\n"), set())
+
+    def test_continue_refuses_when_no_test_command_is_found(self):  # item 7
+        self.conflict()
+        self.resolve("alpha-1\nbeta\nresolved\n")
+        Path("Makefile").unlink()
+        code, _, err = self.run_stack("continue")
+        self.assertEqual(code, 1)
+        self.assertIn("no test command found - pass --test-cmd", err)
+
+    def test_continue_test_cmd_flag_wins_over_discovery(self):  # item 7
+        self.conflict()
+        self.resolve("alpha-1\nbeta\nresolved\n")
+        Path("Makefile").write_text("test:\n\t@exit 3\n")  # discovery would fail
+        code, out, _ = self.run_stack("continue", "--test-cmd", f"echo flag > {self.marker}")
+        self.assertEqual(code, 0)
+        self.assertIn(f"tests green: echo flag > {self.marker}", out)
+        self.assertEqual(self.marker.read_text(), "flag\n")
+
+    def test_head_returns_to_the_start_branch(self):  # item 8
+        self.fixup()
+        self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)  # clean run
+        self.assertEqual(g("symbolic-ref", "--short", "HEAD"), "slice/feat-1")
+        self.assertEqual(self.run_stack("abort")[0], 0)
+        self.assertEqual(g("symbolic-ref", "--short", "HEAD"), "slice/feat-1")
+        self.main_moves()
+        self.assertEqual(self.run_stack("restack", "--from", "1")[0], 0)
+        g("switch", "-q", "slice/feat-2")  # wander off, then abort from elsewhere
+        self.assertEqual(self.run_stack("abort")[0], 0)
+        self.assertEqual(g("symbolic-ref", "--short", "HEAD"), "main")
+
+    def test_head_returns_after_the_final_continue(self):  # item 8
+        self.conflict()  # started on main; HEAD is detached mid-rebase
+        self.resolve("alpha-1\nbeta\nresolved\n")
+        self.assertEqual(self.run_stack("continue")[0], 0)
+        self.assertEqual(g("symbolic-ref", "--short", "HEAD"), "main")
+
+    def test_restore_head_needs_the_starting_worktree_and_a_clean_tree(self):  # item 8
+        state = {"start_branch": "slice/feat-2", "start_worktree": str(Path.cwd())}
+        stack.restore_head({**state, "start_worktree": str(self.plan.parent)})  # another worktree
+        self.assertEqual(g("symbolic-ref", "--short", "HEAD"), "slice/feat-1")
+        Path("n.txt").write_text("n\n")
+        g("add", "n.txt")  # a staged new file: git would carry it across a switch
+        stack.restore_head(state)  # dirty tree
+        self.assertEqual(g("symbolic-ref", "--short", "HEAD"), "slice/feat-1")
+        g("rm", "-q", "--cached", "n.txt")  # untracked files never count
+        stack.restore_head(state)
+        self.assertEqual(g("symbolic-ref", "--short", "HEAD"), "slice/feat-2")
+
+    def test_final_continue_deletes_conflict_artifacts(self):  # item 9
+        self.conflict()
+        self.assertTrue((self.plan.parent / "conflict-report.md").exists())
+        self.resolve("alpha-1\nbeta\nresolved\n")
+        self.assertEqual(self.run_stack("continue")[0], 0)
+        self.assertFalse((self.plan.parent / "conflict-report.md").exists())
+        self.assertFalse((self.plan.parent / ".stack-conflict").exists())
+
+    def test_conflict_on_a_non_ascii_filename_is_named_in_the_brief(self):  # item 11
+        g("switch", "-q", "main")
+        for n in (1, 2, 3):
+            g("branch", "-q", "-D", f"slice/feat-{n}")
+        commit("\u00e9t\u00e9.txt", "alpha\nbeta\ngamma\n", "base file")
+        g("switch", "-q", "-c", "slice/feat-1")
+        commit("\u00e9t\u00e9.txt", "alpha-1\nbeta\ngamma\n", "slice 1")
+        g("switch", "-q", "-c", "slice/feat-2")
+        commit("\u00e9t\u00e9.txt", "alpha-1\nbeta\ngamma-2\n", "slice 2")
+        g("switch", "-q", "main")
+        commit("\u00e9t\u00e9.txt", "alpha\nbeta\ngamma-main\n", "main moves gamma")
+        code, _, err = self.run_stack("restack", "--from", "1")
+        self.assertEqual((code, "CONFLICT" in err), (1, True))
+        report = (self.plan.parent / "conflict-report.md").read_text()
+        self.assertIn("### \u00e9t\u00e9.txt", report)
+        self.assertIn("\u00e9t\u00e9.txt base lines", report)  # hunk classification found it
+        art = self.plan.parent / ".stack-conflict" / "2"
+        self.assertIn("1-ours-\u00e9t\u00e9.txt", [p.name for p in art.iterdir()])
+
+    def test_state_creation_is_atomic_when_a_concurrent_restack_wins(self):  # item 12
+        before = g("for-each-ref")
+        rival = lambda *a: self.state.write_text("{}")  # noqa: E731  runs after the exists() check
+        with mock.patch("stack.refuse_diverged", side_effect=rival):
+            code, _, err = self.run_stack("restack", "--from", "2")
+        self.assertEqual(code, 1)
+        self.assertIn("a restack is already recorded in", err)
+        self.assertEqual(self.state.read_text(), "{}")  # the rival's file survives
+        self.assertEqual(g("for-each-ref"), before)
+
+    def test_abort_dry_run_previews_the_lost_commits_refusal(self):  # item 13
+        self.main_moves()
+        self.assertEqual(self.run_stack("restack", "--from", "1")[0], 0)
+        g("switch", "-q", "slice/feat-2")
+        commit("p.txt", "p\n", "PRECIOUS")
+        precious = g("rev-parse", "HEAD")
+        before = g("for-each-ref"), g("status", "--porcelain"), self.state.read_text()
+        code, out, err = self.run_stack("abort", "--dry-run")
+        self.assertEqual(code, 1)
+        self.assertIn(f"slice/feat-2 has commits not in the recorded restack ({precious}); "
+                      "abort would discard them - re-run with --force to restore anyway", err)
+        self.assertEqual((g("for-each-ref"), g("status", "--porcelain"), self.state.read_text()), before)
+        self.assertEqual(self.run_stack("abort", "--dry-run", "--force")[0], 0)  # --force previews it
+
 
 class OldBaseTest(unittest.TestCase):
     """Slices 2 and 3 were built on slice 1; slice 1 is then amended."""
@@ -550,6 +694,7 @@ class PushTest(unittest.TestCase):
     run_stack = StackTest.run_stack
     fixup = LifecycleTest.fixup
     conflict = LifecycleTest.conflict
+    tips = LifecycleTest.tips
 
     def setUp(self):
         LifecycleTest.setUp(self)
@@ -568,15 +713,30 @@ class PushTest(unittest.TestCase):
         self.fixup()
         self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)
 
-    def gh_stub(self, replies):
-        """PATH with a gh script answering `gh pr view <branch>` from replies."""
+    def gh_bin(self, body):
+        """A directory holding a gh script with this shell body."""
         d = self.plan.parent / "bin"
-        d.mkdir()
-        cases = "".join(f"{b}) echo '{j}';; " for b, j in replies.items())
-        (d / "gh").write_text(f'#!/bin/sh\ncase "$3" in {cases}*) exit 1;; esac\n')
+        d.mkdir(exist_ok=True)
+        (d / "gh").write_text(f"#!/bin/sh\n{body}\n")
         (d / "gh").chmod(0o755)
+        return d
+
+    def gh_patches(self, d):
         return (mock.patch("stack.shutil.which", return_value=str(d / "gh")),
                 mock.patch.dict(os.environ, {"PATH": f"{d}{os.pathsep}{os.environ['PATH']}"}))
+
+    def gh_stub(self, replies):
+        """PATH with a gh script answering `gh pr view <branch>` from replies."""
+        cases = "".join(f"{b}) echo '{j}';; " for b, j in replies.items())
+        return self.gh_patches(self.gh_bin(
+            f'case "$3" in {cases}*) echo "no pull requests found" >&2; exit 1;; esac'))
+
+    def theirs(self, n):
+        """A teammate pushes a new commit on top of slice n's original tip to origin."""
+        sha = g("--git-dir", str(self.origin), "commit-tree", f"{self.orig[n]}^{{tree}}",
+                "-p", self.orig[n], "-m", "teammate")
+        g("--git-dir", str(self.origin), "update-ref", f"refs/heads/slice/feat-{n}", sha)
+        return sha
 
     def test_push_after_restack_moves_origin_tips_and_records_pushed(self):  # B17
         self.restacked()
@@ -630,23 +790,6 @@ class PushTest(unittest.TestCase):
         self.assertEqual(self.remote(2), before)
         self.assertEqual((self.remote(1), self.remote(3)), (self.local(1), self.local(3)))
 
-    def test_lease_rejection_aborts_and_abort_spares_pushed_branches(self):  # B17
-        self.restacked()
-        theirs = self.orig[3]  # somebody pushes slice 2 behind our back
-        g("--git-dir", str(self.origin), "update-ref", "refs/heads/slice/feat-2", theirs)
-        code, out, err = self.run_stack("push", "--yes")
-        self.assertEqual(code, 1)
-        self.assertIn("concurrent", err)
-        self.assertIn("Nothing after slice/feat-2 was pushed", err)
-        self.assertEqual((self.remote(1), self.remote(2), self.remote(3)),
-                         (self.local(1), theirs, self.orig[3]))  # theirs kept, 3 untouched
-        self.assertEqual(json.loads(self.state.read_text())["position"]["pushed"],
-                         ["slice/feat-1"])
-        pushed_tip = self.local(1)
-        self.assertEqual(self.run_stack("abort")[0], 0)  # pushed branch is not moved back
-        self.assertEqual(self.local(1), pushed_tip)
-        self.assertEqual((self.local(2), self.local(3)), (self.orig[2], self.orig[3]))
-
     def test_dry_run_prints_plan_and_mutates_nothing(self):  # B17
         self.restacked()
         before = g("for-each-ref"), g("--git-dir", str(self.origin), "for-each-ref")
@@ -682,23 +825,13 @@ class PushTest(unittest.TestCase):
         self.assertEqual([self.remote(n) for n in (1, 2, 3)], [self.local(n) for n in (1, 2, 3)])
         self.assertIn("already recorded", self.run_stack("push", "--from", "2")[2])
 
-    def test_published_branch_stays_put_when_a_later_lease_is_rejected(self):  # item 3
-        g("switch", "-q", "main")
-        commit("m.txt", "m\n", "main moves")
-        self.assertEqual(self.run_stack("restack", "--from", "1")[0], 0)
-        theirs = g("--git-dir", str(self.origin), "commit-tree", f"{self.orig[2]}^{{tree}}",
-                   "-p", self.orig[2], "-m", "teammate")
-        g("--git-dir", str(self.origin), "update-ref", "refs/heads/slice/feat-2", theirs)
-        code, _, err = self.run_stack("push", "--yes")
-        self.assertEqual(code, 1)
-        self.assertIn("concurrent", err)
-        pushed = self.local(1)
-        self.assertEqual((self.remote(1), self.remote(2)), (pushed, theirs))
-        self.assertNotEqual(pushed, self.orig[1])
-        g("switch", "-q", "main")
+    def test_abort_after_a_successful_push_leaves_published_branches(self):  # slice 12 item 3
+        self.restacked()
+        self.assertEqual(self.run_stack("push", "--yes")[0], 0)
+        published = self.tips()
         self.assertEqual(self.run_stack("abort")[0], 0)
-        self.assertEqual((self.local(1), self.remote(1)), (pushed, pushed))
-        self.assertEqual((self.local(2), self.local(3)), (self.orig[2], self.orig[3]))
+        self.assertEqual(self.tips(), published)  # origin has them: abort must not rewind
+        self.assertNotEqual(published[2], self.orig[2])
 
     def test_restack_refuses_when_origin_has_commits_the_local_branch_lacks(self):  # item 6
         theirs = g("--git-dir", str(self.origin), "commit-tree", f"{self.orig[2]}^{{tree}}",
@@ -713,3 +846,157 @@ class PushTest(unittest.TestCase):
         self.assertIn("integrate them (git rebase origin/slice/feat-2) before restacking", err)
         self.assertFalse(self.state.exists())
         self.assertEqual(g("for-each-ref"), before)
+
+    # --- slice 14: push safety (items 1-5, 8, 10) ---
+
+    def test_push_on_closed_stdin_refuses_without_yes(self):  # item 1 (message is new)
+        self.restacked()
+        before = [self.remote(n) for n in (1, 2, 3)]
+        d = self.gh_bin('echo "no pull requests found" >&2; exit 1')
+        r = subprocess.run([sys.executable, stack.__file__, "push", str(self.plan)],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           env={**os.environ, "PATH": f"{d}{os.pathsep}{os.environ['PATH']}"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("refusing to push without confirmation (stdin closed) - pass --yes", r.stderr)
+        self.assertEqual([self.remote(n) for n in (1, 2, 3)], before)
+
+    def test_lease_is_the_sha_captured_at_restack_not_the_tracking_ref(self):  # item 2 (pins)
+        self.restacked()
+        theirs = self.theirs(2)
+        g("fetch", "-q", "origin")  # the tracking ref now holds the teammate's commit
+        self.assertEqual(g("rev-parse", "refs/remotes/origin/slice/feat-2"), theirs)
+        code, _, err = self.run_stack("push", "--yes")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.remote(2), theirs)
+
+    def test_rejected_lease_pushes_nothing_atomically(self):  # item 3
+        self.restacked()
+        theirs = self.theirs(2)
+        code, out, err = self.run_stack("push", "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("push rejected - nothing was pushed (atomic). origin changed since the "
+                      "restack: inspect with git fetch && git log origin/slice/feat-2, then "
+                      "stack.py abort and restack", err)
+        self.assertEqual([self.remote(n) for n in (1, 2, 3)], [self.orig[1], theirs, self.orig[3]])
+        self.assertNotIn("pushed slice/feat-1", out)
+        self.assertNotIn("pushed", json.loads(self.state.read_text())["position"])
+        self.assertEqual(self.run_stack("abort")[0], 0)  # nothing published: all restored
+        self.assertEqual((self.local(2), self.local(3)), (self.orig[2], self.orig[3]))
+
+    def test_push_is_one_atomic_command_with_one_lease_per_branch(self):  # item 3
+        g("push", "-q", "origin", ":slice/feat-3")  # slice 3 is not on origin: null lease
+        self.restacked()
+        with mock.patch("stack.run", wraps=stack.run) as run:
+            code, out, _ = self.run_stack("push", "--yes")
+        self.assertEqual(code, 0)
+        pushes = [c.args for c in run.call_args_list if c.args[0] == "push"]
+        self.assertEqual(pushes, [(
+            "push", "--atomic",
+            f"--force-with-lease=refs/heads/slice/feat-1:{self.orig[1]}",
+            f"--force-with-lease=refs/heads/slice/feat-2:{self.orig[2]}",
+            "--force-with-lease=refs/heads/slice/feat-3:",
+            "origin", "slice/feat-1", "slice/feat-2", "slice/feat-3")])
+        for n in (1, 2, 3):
+            self.assertIn(f"pushed slice/feat-{n} -> {self.local(n)[:7]}", out)
+        pos = json.loads(self.state.read_text())["position"]
+        self.assertEqual(pos["pushed"], ["slice/feat-1", "slice/feat-2", "slice/feat-3"])
+
+    def test_null_lease_rejects_when_the_branch_appeared_on_origin(self):  # item 3
+        g("push", "-q", "origin", ":slice/feat-3")
+        self.restacked()
+        g("--git-dir", str(self.origin), "update-ref", "refs/heads/slice/feat-3", self.orig[3])
+        code, _, err = self.run_stack("push", "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("nothing was pushed (atomic)", err)
+        self.assertEqual([self.remote(1), self.remote(3)], [self.orig[1], self.orig[3]])
+
+    def test_cost_report_lists_the_exact_push_set(self):  # item 4
+        g("push", "-q", "origin", ":slice/feat-3")  # slice 3 unpublished
+        g("switch", "-q", "slice/feat-2")
+        commit("wip.txt", "wip\n", "local-only WIP")  # not pushed, below --from 3
+        g("switch", "-q", "slice/feat-1")
+        old2 = self.remote(2)
+        code, out, _ = self.run_stack("push", "--from", "3", "--yes")
+        self.assertEqual(code, 0)
+        self.assertIn(f"slice/feat-2: {old2[:7]} -> {self.local(2)[:7]} (not restacked in this run)", out)
+        self.assertIn(f"slice/feat-3: new branch -> {self.local(3)[:7]}", out)
+        self.assertNotIn("slice/feat-1: " + self.remote(1)[:7], out)  # tip equals remote: not in the set
+        self.assertLess(out.index("slice/feat-3: new branch"), out.index("pushed slice/feat-2"))
+        self.assertEqual([self.remote(n) for n in (1, 2, 3)], [self.local(n) for n in (1, 2, 3)])
+
+    def test_dry_run_from_does_not_simulate_the_restack(self):  # item 4
+        code, out, _ = self.run_stack("push", "--from", "2", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("restack 2..3 would run first; push set is computed after it", out)
+        self.assertNotIn("push slice/feat-2", out)
+        self.assertNotIn("push slice/feat-3", out)
+        self.assertEqual(out.count("[skip: tip equals remote]"), 1)  # slice 1 only
+        self.assertIn("push slice/feat-1", out)  # below --from: untouched by the restack
+
+    def test_push_refuses_while_a_restack_is_unfinished(self):  # item 5 (pins)
+        self.restacked()
+        state = json.loads(self.state.read_text())
+        state["position"]["next_branch"] = "slice/feat-2"
+        self.state.write_text(json.dumps(state))
+        before = [self.remote(n) for n in (1, 2, 3)]
+        code, _, err = self.run_stack("push", "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("restack is unfinished", err)
+        self.assertEqual([self.remote(n) for n in (1, 2, 3)], before)
+
+    def test_head_returns_to_the_start_branch_after_push(self):  # item 8
+        self.restacked()
+        g("switch", "-q", "slice/feat-3")
+        self.assertEqual(self.run_stack("push", "--yes")[0], 0)
+        self.assertEqual(g("symbolic-ref", "--short", "HEAD"), "slice/feat-1")
+
+    def test_gh_failure_is_loud_once_per_branch_but_no_pr_is_silent(self):  # item 10
+        self.restacked()
+        with contextlib.ExitStack() as st:
+            for p in self.gh_patches(self.gh_bin('echo "authentication required" >&2; exit 1')):
+                st.enter_context(p)
+            code, _, err = self.run_stack("push", "--yes")
+        self.assertEqual(code, 0)
+        for n in (1, 2, 3):
+            self.assertEqual(err.count("gh: authentication required - merged-PR protection "
+                                       f"unavailable for slice/feat-{n}\n"), 1)
+        with contextlib.ExitStack() as st:
+            for p in self.gh_stub({}):  # "no pull requests found"
+                st.enter_context(p)
+            self.assertEqual(self.run_stack("push", "--yes")[2], "")
+
+
+class DiscoverTest(unittest.TestCase):
+    """discover_test_cmd: pure function of the files present; nothing is executed."""
+
+    def test_discovery_table(self):  # item 7
+        mk = ("Makefile", "build:\n\tx\ntest:\n\ty\n")
+        cases = [
+            ("Makefile test target", [mk], None, "make test"),
+            ("retest: is not test:", [("Makefile", "retest:\n\tx\n")], None, None),
+            ("indented test: is not a target", [("Makefile", " test:\n")], None, None),
+            ("package.json with scripts.test", [("package.json", '{"scripts":{"test":"x"}}')],
+             None, "npm test"),
+            ("package.json without scripts.test", [("package.json", '{"scripts":{"build":"x"}}')],
+             None, None),
+            ("package.json without scripts", [("package.json", "{}")], None, None),
+            ("go.mod", [("go.mod", "module m\n")], None, "go vet ./... && go test ./..."),
+            ("Cargo.toml", [("Cargo.toml", "")], None, "cargo test"),
+            ("pyproject.toml", [("pyproject.toml", "")], None, "python3 -m pytest -q"),
+            ("pytest.ini", [("pytest.ini", "")], None, "python3 -m pytest -q"),
+            ("setup.cfg", [("setup.cfg", "")], None, "python3 -m pytest -q"),
+            ("tox.ini", [("tox.ini", "")], None, "python3 -m pytest -q"),
+            ("nothing", [], None, None),
+            ("Makefile beats go.mod", [mk, ("go.mod", "")], None, "make test"),
+            ("go.mod beats Cargo.toml", [("go.mod", ""), ("Cargo.toml", "")], None,
+             "go vet ./... && go test ./..."),
+            ("Cargo.toml beats pyproject", [("Cargo.toml", ""), ("pyproject.toml", "")], None,
+             "cargo test"),
+            ("--test-cmd wins", [mk, ("go.mod", "")], "pytest tests/", "pytest tests/"),
+            ("--test-cmd with no files", [], "true", "true"),
+        ]
+        for name, files, override, want in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                for f, text in files:
+                    (Path(d) / f).write_text(text)
+                self.assertEqual(stack.discover_test_cmd(Path(d), override), want)
