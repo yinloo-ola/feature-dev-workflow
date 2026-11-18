@@ -96,6 +96,7 @@ class StackTest(unittest.TestCase):
         self.assertEqual(state.pop("created_at")[:2], "20")
         self.assertEqual(state, {
             "plan_path": str(self.plan),
+            "feature": "feat",
             "base": "main",
             "order": [1, 2, 3],
             "branches": {
@@ -361,6 +362,188 @@ class LifecycleTest(unittest.TestCase):
                          {2: self.orig[2], 3: self.orig[3]})
 
 
+    def main_moves(self):  # non-conflicting commit on main: a restack from 1 changes every branch
+        g("switch", "-q", "main")
+        commit("m.txt", "m\n", "main moves")
+
+    def tips(self):
+        return {n: g("rev-parse", f"slice/feat-{n}") for n in (1, 2, 3)}
+
+    def test_state_lives_in_git_common_dir_shared_by_worktrees(self):  # slice 12 item 1
+        repo, wt = Path.cwd(), self.plan.parent / "wt"
+        g("worktree", "add", "-q", str(wt), "slice/feat-3")
+        os.chdir(wt)
+        self.assertEqual(self.run_stack("restack", "--from", "3")[0], 0)
+        os.chdir(repo)
+        g("-C", str(wt), "switch", "-q", "--detach")  # free slice/feat-3 for abort
+        self.assertEqual(json.loads(self.state.read_text())["feature"], "feat")
+        self.assertFalse((repo / ".git" / "worktrees" / "wt" / "stack-state.json").exists())
+        self.assertEqual(self.run_stack("abort")[0], 0)  # the main checkout sees it
+        self.assertFalse(self.state.exists())
+
+    def test_state_of_another_feature_is_refused_and_its_branches_untouched(self):  # item 1
+        for n in (1, 2, 3):
+            g("branch", f"slice/other-{n}", self.orig[n])
+        self.fixup()
+        self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)
+        g("switch", "-q", "main")
+        feat_plan = self.plan
+        self.plan = feat_plan.parent / "other-plan.md"
+        self.plan.write_text(CHAIN.replace("feat", "other"))
+        before = g("for-each-ref")
+        for cmd in ("abort", "continue", "push"):
+            with self.subTest(cmd=cmd):
+                code, _, err = self.run_stack(cmd)
+                self.assertEqual(code, 1)
+                self.assertIn("state belongs to feature feat; run stack.py with that plan, "
+                              f"or remove {self.state.resolve()} to discard", err)
+                self.assertEqual(g("for-each-ref"), before)
+                self.assertTrue(self.state.exists())
+
+    def test_unreadable_state_is_refused_without_a_traceback(self):  # item 1
+        self.state.write_text("{not json")
+        for cmd in ("continue", "abort", "push"):
+            with self.subTest(cmd=cmd):
+                code, _, err = self.run_stack(cmd)
+                self.assertEqual(code, 1)
+                self.assertIn(f"state file {self.state.resolve()} is unreadable (", err)
+                self.assertIn(") - remove it to reset", err)
+
+    def test_abort_refuses_commits_made_after_the_restack_unless_forced(self):  # item 2
+        self.main_moves()
+        self.assertEqual(self.run_stack("restack", "--from", "1")[0], 0)
+        restacked = self.tips()
+        self.assertTrue(all(restacked[n] != self.orig[n] for n in (1, 2, 3)))
+        g("switch", "-q", "slice/feat-2")
+        commit("p.txt", "p\n", "PRECIOUS")
+        precious = g("rev-parse", "HEAD")
+        code, _, err = self.run_stack("abort")
+        self.assertEqual(code, 1)
+        self.assertIn(f"slice/feat-2 has commits not in the recorded restack ({precious}); "
+                      "abort would discard them - re-run with --force to restore anyway "
+                      "(the tip stays in the reflog)", err)
+        self.assertEqual(self.tips(), {**restacked, 2: precious})  # nothing moved
+        self.assertTrue(self.state.exists())
+        code, out, _ = self.run_stack("abort", "--force")
+        self.assertEqual(code, 0)
+        self.assertIn(precious, out)  # the discarded tip is printed
+        self.assertEqual(self.tips(), self.orig)
+        self.assertEqual(g("cat-file", "-t", precious), "commit")  # still in the object store
+
+    def test_abort_refuses_when_a_branch_is_dirty_on_the_current_worktree(self):  # item 4
+        self.fixup()
+        self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)  # HEAD: slice/feat-3
+        restacked = self.tips()
+        Path("b.txt").write_text("edited\n")
+        code, _, err = self.run_stack("abort")
+        self.assertEqual(code, 1)
+        self.assertIn("uncommitted changes on checked-out slice/feat-3 - commit or stash first", err)
+        self.assertEqual(Path("b.txt").read_text(), "edited\n")
+        self.assertEqual(self.tips(), restacked)
+        self.assertTrue(self.state.exists())
+
+    def test_abort_on_a_clean_checked_out_branch_resets_the_tree(self):  # item 4
+        self.fixup()
+        self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)
+        self.assertTrue(Path("c.txt").exists())  # slice 3 carries slice 1's fixup
+        self.assertEqual(self.run_stack("abort")[0], 0)
+        self.assertEqual(g("symbolic-ref", "--short", "HEAD"), "slice/feat-3")
+        self.assertEqual(self.tips()[3], self.orig[3])
+        self.assertFalse(Path("c.txt").exists())
+        self.assertEqual(g("status", "--porcelain", "--untracked-files=no"), "")
+
+    def test_branch_checked_out_in_another_worktree_refuses_restack_and_abort(self):  # item 4
+        wt = self.plan.parent / "wt"
+        g("worktree", "add", "-q", str(wt), "slice/feat-2")
+        before = g("for-each-ref")
+        code, _, err = self.run_stack("restack", "--from", "1")
+        self.assertEqual(code, 1)
+        self.assertIn(f"branch slice/feat-2 is checked out at {wt} - switch that worktree "
+                      "off it, then re-run", err)
+        self.assertFalse(self.state.exists())
+        self.assertEqual(g("for-each-ref"), before)
+        g("worktree", "remove", "--force", str(wt))  # now restack, then pin 2 elsewhere
+        self.fixup()
+        self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)
+        g("worktree", "add", "-q", str(wt), "slice/feat-2")
+        restacked = self.tips()
+        code, _, err = self.run_stack("abort")
+        self.assertEqual(code, 1)
+        self.assertIn("branch slice/feat-2 is checked out at", err)
+        self.assertEqual(self.tips(), restacked)
+        self.assertTrue(self.state.exists())
+
+    def test_from_must_name_a_slice_in_the_plan(self):  # item 7
+        for cmd in ("restack", "push"):
+            for bad in ("0", "9"):
+                with self.subTest(cmd=cmd, bad=bad):
+                    code, _, err = self.run_stack(cmd, "--from", bad)
+                    self.assertEqual(code, 1)
+                    self.assertIn(f"--from {bad}: no such slice (plan has 1, 2, 3)", err)
+                    self.assertFalse(self.state.exists())
+                    self.assertEqual(self.tips(), self.orig)
+
+class OldBaseTest(unittest.TestCase):
+    """Slices 2 and 3 were built on slice 1; slice 1 is then amended."""
+
+    run_stack = StackTest.run_stack
+    ancestors_ok = LifecycleTest.ancestors_ok
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        self.plan = root / "03-plan.md"
+        self.plan.write_text(CHAIN)
+        repo = root / "repo"
+        repo.mkdir()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(repo)
+        g("init", "-q", "-b", "main")
+        for k, v in (("user.name", "t"), ("user.email", "t@t"), ("commit.gpgsign", "false")):
+            g("config", k, v)
+        commit("f.txt", "x\n", "base")
+        for n in (1, 2, 3):
+            g("switch", "-q", "-c", f"slice/feat-{n}")
+            commit(f"s{n}.txt", f"{n}\n", f"slice {n}")
+        g("switch", "-q", "slice/feat-1")
+        self.old1 = g("rev-parse", "HEAD")
+        self.state = Path(".git/stack-state.json")
+        patcher = mock.patch("stack.shutil.which", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_restack_after_amending_slice_1_replays_only_slice_2_and_3(self):  # item 5 (a)
+        Path("s1.txt").write_text("one-amended\n")
+        g("commit", "-q", "-a", "--amend", "-m", "slice 1")
+        code, out, err = self.run_stack("restack", "--from", "2")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(g("show", "slice/feat-2:s1.txt"), "one-amended")
+        self.ancestors_ok()
+        self.assertEqual(g("log", "--format=%s", "-3", "slice/feat-3").splitlines(),
+                         ["slice 3", "slice 2", "slice 1"])
+        self.assertEqual(json.loads(self.state.read_text())["branches"]["2"]["base_old"],
+                         self.old1)
+
+    def test_dry_run_prints_each_base_old(self):  # item 5
+        Path("s1.txt").write_text("one-amended\n")
+        g("commit", "-q", "-a", "--amend", "-m", "slice 1")
+        code, out, _ = self.run_stack("restack", "--from", "2", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn(f"rebase slice/feat-2 onto slice/feat-1 (base_old {self.old1[:7]})", out)
+        self.assertIn(f"rebase slice/feat-3 onto slice/feat-2 (base_old {g('rev-parse', 'slice/feat-2')[:7]})", out)
+
+    def test_restack_after_slice_1_swaps_a_file_for_another(self):  # item 5 (b)
+        g("rm", "-q", "s1.txt")
+        commit("s1new.txt", "new\n", "slice 1")  # commit below is the amend
+        g("reset", "-q", "--soft", "HEAD~1")
+        g("commit", "-q", "--amend", "-m", "slice 1")
+        code, _, err = self.run_stack("restack", "--from", "2")
+        self.assertEqual((code, err), (0, ""))
+        files = g("ls-tree", "-r", "--name-only", "slice/feat-3").splitlines()
+        self.assertNotIn("s1.txt", files)
+        self.assertIn("s1new.txt", files)
+
 class PushTest(unittest.TestCase):
     """push on the 3-slice chain with a bare origin; slice 1 gets a fixup, then restack."""
 
@@ -498,3 +681,35 @@ class PushTest(unittest.TestCase):
         self.assertIn("rebased slice/feat-2", out)
         self.assertEqual([self.remote(n) for n in (1, 2, 3)], [self.local(n) for n in (1, 2, 3)])
         self.assertIn("already recorded", self.run_stack("push", "--from", "2")[2])
+
+    def test_published_branch_stays_put_when_a_later_lease_is_rejected(self):  # item 3
+        g("switch", "-q", "main")
+        commit("m.txt", "m\n", "main moves")
+        self.assertEqual(self.run_stack("restack", "--from", "1")[0], 0)
+        theirs = g("--git-dir", str(self.origin), "commit-tree", f"{self.orig[2]}^{{tree}}",
+                   "-p", self.orig[2], "-m", "teammate")
+        g("--git-dir", str(self.origin), "update-ref", "refs/heads/slice/feat-2", theirs)
+        code, _, err = self.run_stack("push", "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("concurrent", err)
+        pushed = self.local(1)
+        self.assertEqual((self.remote(1), self.remote(2)), (pushed, theirs))
+        self.assertNotEqual(pushed, self.orig[1])
+        g("switch", "-q", "main")
+        self.assertEqual(self.run_stack("abort")[0], 0)
+        self.assertEqual((self.local(1), self.remote(1)), (pushed, pushed))
+        self.assertEqual((self.local(2), self.local(3)), (self.orig[2], self.orig[3]))
+
+    def test_restack_refuses_when_origin_has_commits_the_local_branch_lacks(self):  # item 6
+        theirs = g("--git-dir", str(self.origin), "commit-tree", f"{self.orig[2]}^{{tree}}",
+                   "-p", self.orig[2], "-m", "teammate commit")
+        g("--git-dir", str(self.origin), "update-ref", "refs/heads/slice/feat-2", theirs)
+        g("fetch", "-q", "origin")
+        before = g("for-each-ref")
+        code, _, err = self.run_stack("restack", "--from", "2")
+        self.assertEqual(code, 1)
+        self.assertIn("local slice/feat-2 lacks origin commits (", err)
+        self.assertIn("teammate commit", err)
+        self.assertIn("integrate them (git rebase origin/slice/feat-2) before restacking", err)
+        self.assertFalse(self.state.exists())
+        self.assertEqual(g("for-each-ref"), before)
