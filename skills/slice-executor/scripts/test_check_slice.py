@@ -21,9 +21,10 @@ def plan_text(deliver="parallel", cards=None):
         if c.get("deletes"):
             out.append(f"- deletes-existing: {c['deletes']}")
         out.append(f"- depends-on: {c.get('deps', [])}")
-        out.append("- files:" + "".join(f"\n  - {f}" for f in c.get("files", ["src/a.py"])))
-        out.append("- tests:" + "".join(f"\n  - {f}" for f in c.get("tests", ["test_a.py"])))
-        out.append("- card: |\n    goal\n")
+        b = c.get("bullet", "  - ")  # bullet prefix under files/tests
+        out.append("- files:" + "".join(f"\n{b}{f}" for f in c.get("files", ["src/a.py"])))
+        out.append("- tests:" + "".join(f"\n{b}{f}" for f in c.get("tests", ["test_a.py"])))
+        out.append("- card: |\n    goal\n" + c.get("prose", ""))
     return "\n".join(out)
 
 
@@ -37,30 +38,37 @@ class Repo:
         self.commit("init")
 
     def git(self, *a):
-        r = subprocess.run(["git", *a], cwd=self.dir, env=GIT_ENV, capture_output=True, text=True)
+        r = subprocess.run(["git", *a], cwd=self.dir, env=GIT_ENV, capture_output=True,
+                           text=True, encoding="utf-8")
         assert r.returncode == 0, r.stderr
         return r.stdout.strip()
 
     def write(self, rel, text):
         p = self.dir / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text)
+        p.write_text(text, encoding="utf-8")
+
+    def write_bytes(self, rel, data):
+        p = self.dir / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
 
     def commit(self, msg):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", msg)
 
     def run(self, mode, n, plan):
-        self.plan.write_text(plan)
+        self.plan.write_text(plan, encoding="utf-8")
         r = subprocess.run([sys.executable, str(SCRIPT), mode, str(self.plan), str(n)],
-                           cwd=self.dir, capture_output=True, text=True)
+                           cwd=self.dir, capture_output=True, text=True, encoding="utf-8",
+                           env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         return r.returncode, r.stdout + r.stderr
 
     def branch(self, name):
         self.git("checkout", "-q", "-b", name)
 
 
-class VerifyGates(unittest.TestCase):
+class GateCase(unittest.TestCase):
     def setUp(self):
         self._t = tempfile.TemporaryDirectory()
         self.addCleanup(self._t.cleanup)
@@ -71,6 +79,8 @@ class VerifyGates(unittest.TestCase):
         card.setdefault("files", ["src/a.py"])
         return self.r.run("verify", 1, plan_text(cards={1: card}))
 
+
+class VerifyGates(GateCase):
     # B7
     def test_b7_undeclared_production_file_fails(self):
         self.r.write("src/a.py", "a\nb\nc\nd\n")
@@ -202,6 +212,207 @@ class VerifyGates(unittest.TestCase):
         rc, out = self.verify()
         self.assertEqual(rc, 1)
         self.assertIn("size report — code: 1, tests: 0, data/generated: 0 (no cap)", out)
+
+
+BIN = bytes(range(256))  # NUL bytes + invalid UTF-8: git numstat reports "-\t-"
+
+
+class GateFixes(GateCase):
+    """Slice 13: crash, false-pass and false-fail fixes. Items 1-5 each FAIL on the pre-fix
+    code; item 6 rows are boundary rows that pin the gates against mutation."""
+
+    def base_change(self):  # the declared src + test change every case needs
+        self.r.write("src/a.py", "a\nb\nc\nd\n")
+        self.r.write("test_a.py", "t\n")
+
+    # 1. binary / non-UTF-8
+    def test_i1_binary_declared_ok(self):
+        self.base_change()
+        self.r.write_bytes("blob.bin", BIN)
+        self.r.commit("x")
+        rc, out = self.verify(files=["src/a.py", "blob.bin"])
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("Traceback", out)
+
+    def test_i1_binary_undeclared_fails_without_traceback(self):
+        self.base_change()
+        self.r.write_bytes("blob.bin", BIN)
+        self.r.commit("x")
+        rc, out = self.verify()
+        self.assertEqual(rc, 1, out)
+        self.assertNotIn("Traceback", out)
+        self.assertIn("scope:", out)
+        self.assertIn("blob.bin", out)
+
+    def test_i1_binary_modified_has_no_deletions(self):
+        self.r.git("checkout", "-q", "main")
+        self.r.write_bytes("blob.bin", BIN)
+        self.r.commit("blob")
+        self.r.git("checkout", "-q", "-B", "slice/feat-1")
+        self.base_change()
+        self.r.write_bytes("blob.bin", BIN[::-1])
+        self.r.commit("x")
+        rc, out = self.verify(files=["src/a.py", "blob.bin"])  # no deletes-existing
+        self.assertEqual(rc, 0, out)
+        self.assertIn("code: 1, tests: 1, data/generated: 0", out)
+
+    def test_i1_non_utf8_text_file_does_not_crash(self):
+        self.r.write_bytes("src/a.py", b"a\nb\nc\n\xe9\n")  # latin-1 text, no NUL
+        self.r.write("test_a.py", "t\n")
+        self.r.commit("x")
+        rc, out = self.verify()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("Traceback", out)
+
+    # 2. paths: NUL-separated, unquoted, rename = delete + add
+    def test_i2_non_ascii_and_space_paths_declared_ok(self):
+        self.base_change()
+        self.r.write("src/dïr/é.py", "x\n")
+        self.r.write("src/with space.py", "x\n")
+        self.r.commit("x")
+        rc, out = self.verify(files=["src/a.py", "src/dïr/é.py", "src/with space.py"])
+        self.assertEqual(rc, 0, out)
+
+    def test_i2_undeclared_non_ascii_path_named_unquoted(self):
+        self.base_change()
+        self.r.write("src/ü x.py", "x\n")
+        self.r.commit("x")
+        rc, out = self.verify()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("src/ü x.py", out)
+
+    def test_i2_rename_both_paths_declared_ok(self):
+        self.r.git("mv", "src/a.py", "src/b.py")
+        self.r.write("test_a.py", "t\n")
+        self.r.commit("x")
+        rc, out = self.verify(files=["src/a.py", "src/b.py"], deletes="yes — rename a to b")
+        self.assertEqual(rc, 0, out)
+
+    def test_i2_rename_one_path_undeclared_fails_with_note(self):
+        self.r.git("mv", "src/a.py", "src/b.py")
+        self.r.write("test_a.py", "t\n")
+        self.r.commit("x")
+        rc, out = self.verify(files=["src/b.py"], deletes="yes — rename a to b")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("src/a.py", out)
+        self.assertIn("renames need both paths declared", out)
+
+    # 3. exclusions match directory components, not substrings
+    def test_i3_substring_dirs_are_not_excluded(self):
+        for path in ("src/rebuild/prod.py", "redist/x.py"):
+            with self.subTest(path=path):
+                self.r.git("checkout", "-q", "-B", "slice/feat-1", "main")
+                self.base_change()
+                self.r.write(path, "x\n")
+                self.r.commit("x")
+                rc, out = self.verify()
+                self.assertEqual(rc, 1, out)
+                self.assertIn(path, out)
+
+    def test_i3_directory_components_are_excluded_at_any_depth(self):
+        for path in ("a/vendor/b.go", "build/x.js", "dist/y.js"):
+            with self.subTest(path=path):
+                self.r.git("checkout", "-q", "-B", "slice/feat-1", "main")
+                self.base_change()
+                self.r.write(path, "x\n")
+                self.r.commit("x")
+                rc, out = self.verify()
+                self.assertEqual(rc, 0, out)
+                self.assertIn("code: 1, tests: 1, data/generated: 1", out)
+
+    # 4. widened TEST_RE
+    def test_i4_test_files_warn_not_fail_and_count_as_tests(self):
+        for path in ("test_bar.py", "foo.test.mjs", "foo.test.jsx", "tests/helper.py",
+                     "src/__tests__/x.ts", "conftest.py", "FooTest.java", "x_spec.rb"):
+            with self.subTest(path=path):
+                self.r.git("checkout", "-q", "-B", "slice/feat-1", "main")
+                self.base_change()
+                self.r.write(path, "1\n2\n")
+                self.r.commit("x")
+                rc, out = self.verify()
+                self.assertEqual(rc, 0, out)
+                self.assertIn(f"WARN: scope: {path}: undeclared test file edited", out)
+                self.assertIn("code: 1, tests: 3, data/generated: 0", out)
+
+    def test_i4_contest_is_not_a_test(self):
+        self.base_change()
+        self.r.write("src/contest.py", "x\n")
+        self.r.commit("x")
+        rc, out = self.verify()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("scope:", out)
+        self.assertIn("src/contest.py", out)
+
+    # 5. parser aligned with plan_lint
+    def test_i5_indented_and_tab_bullets_are_declared(self):
+        self.base_change()
+        self.r.commit("x")
+        for bullet in ("    - ", "\t- "):
+            with self.subTest(bullet=bullet):
+                rc, out = self.verify(bullet=bullet)
+                self.assertEqual(rc, 0, out)
+
+    def test_i5_prose_field_lookalike_is_not_a_field(self):
+        self.base_change()
+        self.r.write("src/evil.py", "x\n")
+        self.r.commit("x")
+        rc, out = self.verify(prose="    - files: src/evil.py\n")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("src/evil.py", out)
+
+    def test_i5_bad_deliver_value_exits_1(self):
+        self.base_change()
+        self.r.commit("x")
+        rc, out = self.r.run("verify", 1, plan_text("statcked", {1: {"files": ["src/a.py"]}}))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("deliver must be parallel or stacked, got 'statcked'", out)
+
+    # 6. boundary / mutation rows (pass pre-fix by design; they pin the behavior)
+    def test_i6_single_deleted_line_fails_without_declaration(self):
+        self.r.write("src/a.py", "a\nb\n")  # exactly one deleted non-test line
+        self.r.write("test_a.py", "t\n")
+        self.r.commit("x")
+        rc, out = self.verify()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("1 non-test lines deleted — declare deletes-existing: yes", out)
+
+    def test_i6_size_report_counts_adds_plus_dels(self):
+        self.r.write("src/a.py", "a\nn1\nn2\nn3\n")  # 3 adds, 2 dels
+        self.r.write("test_a.py", "t\n")
+        self.r.commit("x")
+        rc, out = self.verify(deletes="yes — replaces b,c")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("code: 5, tests: 1, data/generated: 0", out)
+
+    def test_i6_dirty_tracked_file_fails(self):
+        self.base_change()
+        self.r.commit("x")
+        self.r.write("src/a.py", "dirty\n")
+        rc, out = self.verify()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("working tree is not clean", out)
+
+    def test_i6_branch_identical_to_base_fails(self):
+        rc, out = self.verify()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("no changes between main and HEAD", out)
+
+    def test_i6_generated_header_line_2_is_generated_line_3_is_code(self):
+        self.base_change()
+        self.r.write("src/l2.go", "x\n// Code generated by tool. DO NOT EDIT.\n")
+        self.r.write("src/l3.go", "x\ny\n// Code generated by tool. DO NOT EDIT.\n")
+        self.r.commit("x")
+        rc, out = self.verify(files=["src/a.py", "src/l2.go", "src/l3.go"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("code: 4, tests: 1, data/generated: 2", out)
+
+    def test_i6_declared_test_file_never_warns(self):
+        self.base_change()
+        self.r.write("test_b.py", "t\n")
+        self.r.commit("x")
+        rc, out = self.verify(tests=["test_a.py", "test_b.py"])
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("WARN", out)
 
 
 class StackedVerify(unittest.TestCase):
