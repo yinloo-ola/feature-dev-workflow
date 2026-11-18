@@ -30,7 +30,7 @@ from pathlib import Path
 SLICE_RE = re.compile(r"^### Slice (\d+):")
 MUTATING = ("restack", "continue", "abort", "push")
 RESUMING = ("continue", "abort")  # run mid-conflict: tree is dirty, a rebase is open
-MARKER_RE = re.compile(r"^(<{7}|={7}|>{7})( |$)")
+MARKER_RE = re.compile(r"^(<{7}|>{7})( |$)")  # a lone ======= is a setext heading, not a marker
 IMPORT_RE = re.compile(r"\s*(import\s|from\s+\S+\s+import\s|#include\b|use\s|"
                        r"(const|let|var)\s.*=\s*require\()")
 
