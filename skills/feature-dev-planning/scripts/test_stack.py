@@ -89,6 +89,14 @@ class StackTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("edges must point to earlier", err)
 
+    def test_self_dependency_is_refused(self):  # slice 17 item 9
+        self.plan.write_text(PLAN.replace("### Slice 2: two\n- depends-on: [1]",
+                                          "### Slice 2: two\n- depends-on: [2]"))
+        code, _, err = self.run_stack("status")
+        self.assertEqual(code, 1)
+        self.assertIn("slice 2 depends-on [2]", err)
+        self.assertIn("edges must point to earlier", err)
+
     def test_mutating_command_writes_state_with_captured_shas(self):
         code, out, _ = self.run_stack("restack", "--from", "3")  # slice 3 has no branch
         self.assertEqual(code, 0)
@@ -371,6 +379,48 @@ class LifecycleTest(unittest.TestCase):
 
     def tips(self):
         return {n: g("rev-parse", f"slice/feat-{n}") for n in (1, 2, 3)}
+
+    def continued(self):  # a conflict resolved by hand and finished by continue
+        self.conflict()
+        self.resolve("alpha-1\nbeta\nresolved\n")
+        self.assertEqual(self.run_stack("continue")[0], 0)
+        self.assertNotEqual(self.tips()[2], self.orig[2])
+
+    def test_continue_records_new_sha_so_abort_restores_without_force(self):  # slice 17 item 4
+        self.continued()
+        branches = json.loads(self.state.read_text())["branches"]
+        self.assertEqual({n: branches[str(n)]["new_sha"] for n in (1, 2, 3)}, self.tips())
+        code, _, err = self.run_stack("abort")  # no --force
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.tips(), self.orig)
+
+    def test_commit_made_after_continue_makes_abort_refuse_without_force(self):  # slice 17 item 4
+        self.continued()
+        restacked = self.tips()
+        g("switch", "-q", "slice/feat-2")
+        commit("p.txt", "p\n", "PRECIOUS")
+        precious = g("rev-parse", "HEAD")
+        code, _, err = self.run_stack("abort")
+        self.assertEqual(code, 1)
+        self.assertIn(f"slice/feat-2 has commits not in the recorded restack ({precious})", err)
+        self.assertEqual(self.tips(), {**restacked, 2: precious})
+        self.assertEqual(self.run_stack("abort", "--force")[0], 0)
+        self.assertEqual(self.tips(), self.orig)
+
+    def test_restack_falls_back_to_plain_merge_base_without_a_reflog_fork_point(self):  # item 5a
+        self.main_moves()
+        m0 = g("rev-parse", "main~1")  # the commit the stack was built on
+        g("rebase", "-q", "main", "slice/feat-1")  # slice 1 moves; slice 2 still sits on its old tip
+        g("switch", "-q", "main")
+        g("reflog", "expire", "--expire=now", "--all")  # no fork point can be found now
+        self.assertIsNone(stack.git("merge-base", "--fork-point", "slice/feat-1", "slice/feat-2"))
+        code, out, err = self.run_stack("restack", "--from", "2")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("rebased slice/feat-2 onto slice/feat-1", out)
+        self.assertEqual(json.loads(self.state.read_text())["branches"]["2"]["base_old"], m0)
+        self.assertEqual(g("log", "--format=%s", "slice/feat-1..slice/feat-2"),
+                         "slice 2: edit gamma")
+        self.assertEqual(g("show", "slice/feat-2:a.txt"), "alpha-1\nbeta\ngamma-2")
 
     def test_state_lives_in_git_common_dir_shared_by_worktrees(self):  # slice 12 item 1
         repo, wt = Path.cwd(), self.plan.parent / "wt"
@@ -705,6 +755,28 @@ class OldBaseTest(unittest.TestCase):
         self.assertNotIn("s1.txt", files)
         self.assertIn("s1new.txt", files)
 
+    def test_cost_report_uses_the_recorded_base_old_so_slice_2_shows_no_change(self):  # item 5b
+        Path("s1.txt").write_text("one-amended\n")
+        g("commit", "-q", "-a", "--amend", "-m", "slice 1")
+        self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)
+        code, out, _ = self.run_stack("push", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("slice/feat-2: 0 patch(es) changed", out)  # a replay of the same patch
+        self.assertIn("slice/feat-3: 0 patch(es) changed", out)
+
+    def test_cost_report_counts_a_dropped_commit_as_one_changed_patch(self):  # slice 17 item 7
+        g("switch", "-q", "slice/feat-2")
+        commit("s2b.txt", "2b\n", "slice 2b")  # slice 2 now carries two commits
+        g("switch", "-q", "slice/feat-1")
+        Path("s2.txt").write_text("2\n")  # slice 1 absorbs slice 2's first commit verbatim
+        g("add", "s2.txt")
+        g("commit", "-q", "--amend", "--no-edit")
+        self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)
+        self.assertEqual(g("log", "--format=%s", "slice/feat-1..slice/feat-2"), "slice 2b")
+        code, out, _ = self.run_stack("push", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("slice/feat-2: 1 patch(es) changed", out)  # dropped, no replacement
+
 class PushTest(unittest.TestCase):
     """push on the 3-slice chain with a bare origin; slice 1 gets a fixup, then restack."""
 
@@ -983,11 +1055,97 @@ class PushTest(unittest.TestCase):
             self.assertEqual(self.run_stack("push", "--yes")[2], "")
 
 
+    # --- slice 17: pushed list, report accuracy, status note ---
+
+    main_moves = LifecycleTest.main_moves
+
+    def with_gh(self, replies, *argv):
+        with contextlib.ExitStack() as st:
+            for p in self.gh_stub(replies):
+                st.enter_context(p)
+            return self.run_stack(*argv)
+
+    def test_pushed_accumulates_across_pushes_and_abort_restores_none_of_it(self):  # slice 17 item 2
+        self.main_moves()
+        self.assertEqual(self.run_stack("restack", "--from", "1")[0], 0)
+        pushed = lambda: json.loads(self.state.read_text())["position"]["pushed"]  # noqa: E731
+        pr3 = lambda state: {"slice/feat-3": f'{{"number":8,"state":"{state}"}}'}  # noqa: E731
+        self.assertEqual(self.with_gh(pr3("MERGED"), "push", "--yes")[0], 0)
+        self.assertEqual(pushed(), ["slice/feat-1", "slice/feat-2"])
+        self.assertEqual(self.remote(3), self.orig[3])  # its PR merged: not sent
+        self.assertEqual(self.with_gh(pr3("OPEN"), "push", "--yes")[0], 0)
+        self.assertEqual(pushed(), ["slice/feat-1", "slice/feat-2", "slice/feat-3"])
+        published = self.tips()
+        self.assertEqual([self.remote(n) for n in (1, 2, 3)], [published[n] for n in (1, 2, 3)])
+        self.assertEqual(self.run_stack("abort")[0], 0)
+        self.assertEqual(self.tips(), published)  # everything was pushed: nothing is restored
+        self.assertNotEqual(published[1], self.orig[1])
+
+    def test_open_pr_whose_branch_is_skipped_is_not_listed_as_moving(self):  # slice 17 item 7
+        self.fixup()
+        g("push", "-q", "origin", "slice/feat-1")  # slice 1: tip equals remote, so skipped
+        self.assertEqual(self.run_stack("restack", "--from", "2")[0], 0)
+        replies = {f"slice/feat-{n}": f'{{"number":{n + 4},"state":"OPEN"}}' for n in (1, 2)}
+        code, out, _ = self.with_gh(replies, "push", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("skip: tip equals remote", out)
+        self.assertIn("\n    PRs whose heads will move: #6 (slice/feat-2)\n", out)  # not #5
+
+    def test_status_notes_a_pr_whose_base_is_not_the_stack_parent(self):  # slice 17 item 8
+        pr = lambda n, base: (f'{{"number":{n},"headRefName":"x","baseRefName":"{base}",'  # noqa: E731
+                              '"state":"OPEN"}')
+        code, out, _ = self.with_gh({"slice/feat-1": pr(1, "main"),
+                                     "slice/feat-2": pr(2, "main")}, "status")
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertTrue(lines[1].endswith("PR #1 open"))  # base main == stack parent main
+        self.assertTrue(lines[2].endswith("PR #2 open (PR base main, stack parent slice/feat-1)"))
+        code, out, _ = self.with_gh({"slice/feat-1": pr(1, "main"),
+                                     "slice/feat-2": pr(2, "slice/feat-1")}, "status")
+        self.assertEqual(code, 0)
+        self.assertNotIn("PR base", out)
+
+
+class ClassifyTest(unittest.TestCase):
+    """The conflict classifier and hunk finder, on in-memory file sides."""
+
+    def classes(self, base, ours, theirs):
+        return [stack.classify(base, ours, theirs, a, b)
+                for a, b in stack.conflict_hunks(base, ours, theirs)]
+
+    def test_classification_table(self):  # slice 17 item 6
+        imp = "likely mechanical (both add imports)"
+        md = "modify/delete \u2014 decision required"
+        cases = [  # name, base, ours, theirs, expected classes
+            ("imports on both sides", ["x"], ["import os"], ["import sys"], [imp]),
+            ("import on ours, code on theirs", ["x"], ["import os"], ["print(1)"],
+             ["likely semantic"]),
+            ("code on ours, import on theirs", ["x"], ["print(1)"], ["import os"],
+             ["likely semantic"]),
+            ("ours deletes, theirs modifies", ["x"], [], ["y"], [md]),
+            ("ours modifies, theirs deletes", ["x"], ["y"], [], [md]),
+            ("both modify differently", ["x"], ["y"], ["z"], ["likely semantic"]),
+        ]
+        for name, base, ours, theirs, want in cases:
+            with self.subTest(name):
+                self.assertEqual(self.classes(base, ours, theirs), want)
+
+    def test_adjacent_hunks_merge_but_one_line_apart_stay_separate(self):  # slice 17 item 6
+        base = ["a", "b", "c", "d"]
+        edit = lambda i: [x.upper() if k == i else x for k, x in enumerate(base)]  # noqa: E731
+        for name, i, j, hunks in (("same line", 1, 1, 1), ("adjacent", 0, 1, 1),
+                                  ("adjacent, swapped", 1, 0, 1), ("one line apart", 0, 2, 0),
+                                  ("one line apart, swapped", 2, 0, 0)):
+            with self.subTest(name):
+                self.assertEqual(len(stack.conflict_hunks(base, edit(i), edit(j))), hunks)
+
+
 class DiscoverTest(unittest.TestCase):
     """discover_test_cmd: pure function of the files present; nothing is executed."""
 
     def test_discovery_table(self):  # item 7
         mk = ("Makefile", "build:\n\tx\ntest:\n\ty\n")
+        pkg = ("package.json", '{"scripts":{"test":"x"}}')
         cases = [
             ("Makefile test target", [mk], None, "make test"),
             ("retest: is not test:", [("Makefile", "retest:\n\tx\n")], None, None),
@@ -1009,6 +1167,11 @@ class DiscoverTest(unittest.TestCase):
              "go vet ./... && go test ./..."),
             ("Cargo.toml beats pyproject", [("Cargo.toml", ""), ("pyproject.toml", "")], None,
              "cargo test"),
+            ("Makefile beats package.json", [mk, pkg], None, "make test"),
+            ("package.json beats go.mod", [pkg, ("go.mod", "")], None, "npm test"),
+            ("Makefile beats package.json and go.mod", [pkg, ("go.mod", ""), mk], None,
+             "make test"),
+            ("--test-cmd beats all", [mk, pkg, ("go.mod", "")], "pytest tests/", "pytest tests/"),
             ("--test-cmd wins", [mk, ("go.mod", "")], "pytest tests/", "pytest tests/"),
             ("--test-cmd with no files", [], "true", "true"),
         ]
