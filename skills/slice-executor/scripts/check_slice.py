@@ -30,10 +30,11 @@ EXCLUDED = [
     "Cargo.lock", "go.sum", "uv.lock", "Gemfile.lock",
 ]
 EXCLUDED_SUFFIX = (".pb.go", "_pb2.py", ".min.js", ".map", ".po", ".pot")
-EXCLUDED_PARTS = ("vendor/", "node_modules/", "dist/", "build/", "generated/")
-TEST_RE = re.compile(r"(_test\.go$|_test\.py$|\.test\.(ts|tsx|js|mjs)$|\.spec\.(ts|tsx|js)$|_test\.rs$)")
+EXCLUDED_PARTS = ("vendor", "node_modules", "dist", "build", "generated")  # directory names, any depth
+TEST_RE = re.compile(r"(^|/)(test_[^/]*\.py|conftest\.py)$|_test\.(go|py|rs)$|\.(test|spec)\.(ts|tsx|js|jsx|mjs)$|(^|/)(tests?|__tests__)/|(Test|Tests)\.(java|kt)$|_spec\.rb$")
 GENERATED_RE = re.compile(r"Code generated .* DO NOT EDIT\.")  # first two lines of file
-DELIVER_RE = re.compile(r"^deliver:\s*(parallel|stacked)$", re.M)
+DELIVER_RE = re.compile(r"^deliver:\s*(parallel|stacked)$")  # matched per line, same grammar as plan_lint
+FIELD_RE = re.compile(r"^- (\w[\w-]*):(.*)$")  # top-level card field: column 0 only
 DELETES_RE = re.compile(r"^yes\s*—\s*(\S.*)$")  # same grammar as plan_lint
 UNDECLARED_TEST = "undeclared test file edited — orchestrator to resolve (add to card or revert)"
 
@@ -46,20 +47,28 @@ def fail(msgs):
 
 
 def git(*args):
-    r = subprocess.run(["git", *args], capture_output=True, text=True)
+    r = subprocess.run(["git", *args], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
     return r.returncode, r.stdout.strip()
 
 
 def parse_plan(path):
     """Return (base_branch, feature, {num: card}, deliver);
     card = dict(mode, deletes, deps, files, tests)."""
-    text = Path(path).read_text()
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
     base = re.search(r"^Base branch:\s*(\S+)", text, re.M)
     if not base:
         fail([f"{path}: missing 'Base branch:' header"])
     m = re.search(r"^# Plan:\s*(\S+)", text, re.M)
     feature = m.group(1) if m else Path(path).resolve().parent.name
-    deliver = (DELIVER_RE.search(text) or [None, "parallel"])[1]
+    deliver = "parallel"
+    for line in text.splitlines():
+        if line.startswith("deliver:"):
+            m = DELIVER_RE.match(line.rstrip())
+            if not m:
+                fail([f"deliver must be parallel or stacked, got {line[len('deliver:'):].strip()!r}"])
+            deliver = m.group(1)
+            break
     slices, current, field = {}, None, None
     for line in text.splitlines():
         m = SLICE_RE.match(line)
@@ -69,11 +78,10 @@ def parse_plan(path):
             continue
         if current is None:
             continue
-        stripped = line.strip()
-        m = re.match(r"^- (mode|deletes-existing|depends-on|files|tests):(.*)$", stripped)
+        m = FIELD_RE.match(line)
         if m:
             key, rest = m.group(1), m.group(2).strip()
-            field = key if key in ("files", "tests") else None
+            field = key if key in ("files", "tests") else None  # any other field (card, ...) ends the bullets
             c = slices[current]
             if key == "mode":
                 c["mode"] = rest
@@ -84,8 +92,8 @@ def parse_plan(path):
             elif key in ("files", "tests") and rest:
                 c[key].append(rest)
             continue
-        if line.startswith("  - ") and field in ("files", "tests"):
-            slices[current][field].append(line[4:].strip())
+        if field in ("files", "tests") and line.lstrip().startswith("- "):
+            slices[current][field].append(line.lstrip()[2:].strip())
     return base.group(1), feature, slices, deliver
 
 
@@ -97,9 +105,9 @@ def get_card(plan_path, n):
 
 
 def is_excluded(path):
-    name = path.rsplit("/", 1)[-1]
+    *dirs, name = path.split("/")
     return (name in EXCLUDED or name.endswith(EXCLUDED_SUFFIX)
-            or any(p in path for p in EXCLUDED_PARTS))
+            or any(d in EXCLUDED_PARTS for d in dirs))
 
 
 def is_testfile(path, tests):
@@ -177,7 +185,8 @@ def cmd_verify(plan_path, n):
     elif git("rev-parse", "--verify", base)[0] != 0:
         fail([f"base branch {base!r} not found in this repo"])
 
-    rc, out = git("diff", "--numstat", f"{base}...HEAD")
+    rc, out = git("-c", "core.quotepath=off", "diff", "--numstat", "-z", "--no-renames",
+                  f"{base}...HEAD")
     if rc != 0:
         fail([f"cannot diff {base}...HEAD: {out}"])
     if not out.strip():
@@ -185,16 +194,17 @@ def cmd_verify(plan_path, n):
 
     errors, warnings, changed = [], [], []
     code = tests = generated = dels_non_test = 0
-    for line in out.splitlines():
-        parts = line.split("\t", 2)
+    for rec in out.split("\0"):  # adds TAB dels TAB path NUL; renames arrive as delete + add
+        parts = rec.split("\t", 2)
         if len(parts) != 3:
             continue
         adds, dels, path = parts
         changed.append(path)
-        lines = (0 if adds == "-" else int(adds)) + (0 if dels == "-" else int(dels))
-        dels = 0 if dels == "-" else int(dels)
+        binary = adds == "-"  # numstat "-\t-": never opened, no lines to count
+        lines = 0 if binary else int(adds) + int(dels)
+        dels = 0 if binary else int(dels)
         # size report: classify every changed line (never gates)
-        if is_generated(path):
+        if binary or is_generated(path):
             generated += lines
         elif is_testfile(path, card["tests"]):
             tests += lines
@@ -207,7 +217,8 @@ def cmd_verify(plan_path, n):
     outside = [p for p in changed if p not in allowed and not is_excluded(p)]
     prod = [p for p in outside if not is_testfile(p, card["tests"])]
     if prod:
-        errors.append(f"scope: changed files outside the card's declared files/tests: {prod}")
+        errors.append(f"scope: changed files outside the card's declared files/tests: {prod} "
+                      "(renames need both paths declared)")
     warnings += [f"scope: {p}: {UNDECLARED_TEST}" for p in outside if p not in prod]
 
     # deletions gate: non-test deletions need deletes-existing: yes — <what and why>
