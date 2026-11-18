@@ -53,14 +53,20 @@ def ident_card(n, body, files, tests):
     return (f"### Slice {n}: title {n}\n- depends-on: []\n- files:\n  - {files}\n"
             f"- tests:\n  - {tests}\n- card: |\n    {body}\n\n")
 
-def lint_repo(plan, repo_files):
-    """Lint plan_text at <tmp>/.specs/f/03-plan.md inside a git repo holding repo_files."""
+def lint_repo(plan, repo_files, tracked_deleted=()):
+    """Lint plan_text at <tmp>/.specs/f/03-plan.md inside a git repo holding repo_files
+    (str or bytes content); tracked_deleted files are git-added, then removed from disk."""
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         for rel, text in repo_files.items():
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
-            (root / rel).write_text(text)
+            (root / rel).write_bytes(text if isinstance(text, bytes) else text.encode())
+        for rel in tracked_deleted:
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("x\n")
+            subprocess.run(["git", "add", rel], cwd=root, check=True)
+            (root / rel).unlink()
         (root / ".specs/f").mkdir(parents=True)
         p = root / ".specs/f/03-plan.md"
         p.write_text(plan)
@@ -325,15 +331,18 @@ class PlanLintFixes(unittest.TestCase):
                     "### Slice 2: two\n- depends-on: [1]\n- files:\n"
                     f"{i}- src/c.py\n- tests: none\n- card: |\n{i}Do two.\n\n"
                     ).replace("\n", nl)
-        rows = {"4-space": sync_plan("    "), "tab": sync_plan("\t"),
-                "crlf": sync_plan("  ", "\r\n")}
-        for name, text in rows.items():
+        indented = (sync_plan("    ").replace("deliver: stacked\n", "")  # header omitted: parallel
+                    .replace("    Do one.\n", "    Do one.\n      deliver: stacked\n"))  # prose line
+        rows = {"4-space": (sync_plan("    "), "stacked"), "tab": (sync_plan("\t"), "stacked"),
+                "crlf": (sync_plan("  ", "\r\n"), "stacked"),
+                "indented deliver in card prose": (indented, "parallel")}
+        for name, (text, want) in rows.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
                 p = Path(d) / "03-plan.md"
                 p.write_bytes(text.encode())  # bytes: CRLF survives to both parsers
                 _, _, theirs, t_deliver = cs.parse_plan(str(p))
                 mine = plan_lint.parse_plan(text)
-                self.assertEqual((plan_lint.parse_deliver(text), t_deliver), ("stacked", "stacked"))
+                self.assertEqual((plan_lint.parse_deliver(text), t_deliver), (want, want))
                 self.assertEqual(mine[1]["files"], ["src/a.py", "src/b.py"])
                 self.assertEqual(set(mine), set(theirs))
                 for n in mine:
@@ -341,6 +350,79 @@ class PlanLintFixes(unittest.TestCase):
                         self.assertEqual(mine[n][k], theirs[n][k], (n, k))
                     self.assertEqual(mine[n]["deps"] or [], theirs[n]["deps"], n)
                 self.assertEqual(theirs[2]["tests"], ["none"])
+
+
+class PlanLintResidual(unittest.TestCase):
+    """Slice 18: round-3 residual risks (items 7-11)."""
+
+    def fails(self, plan, msg):
+        code, out = lint(plan)
+        self.assertEqual(code, 1, out)
+        self.assertIn(msg, out)
+
+    def test_item7_required_fields(self):
+        def one(body):  # slice 2 built from raw field lines
+            return HEAD + card(1, "") + f"### Slice 2: two\n{body}\n"
+        files = "- files:\n  - src/f2.py\n"
+        tests = "- tests:\n  - src/test_f2.py\n"
+        cardf = "- card: |\n    Do two.\n"
+        rows = {
+            "no Base branch header": (
+                "# Plan: demo\n\n" + card(1, ""), "missing 'Base branch:' header"),
+            "no files": (one("- depends-on: []\n- files:\n" + tests + cardf),
+                         "slice 2: files must list at least one non-test file"),
+            "no tests": (one("- depends-on: []\n" + files + "- tests:\n" + cardf),
+                         "slice 2: tests must list test files or be 'none'"),
+            "empty card": (one("- depends-on: []\n" + files + tests + "- card: |\n"),
+                           "slice 2: card is empty"),
+            "no depends-on": (one(files + tests + cardf),
+                              "slice 2: missing depends-on"),
+            "no slice cards": (HEAD + "\nJust prose.\n", "no slice cards found"),
+        }
+        for name, (plan, msg) in rows.items():
+            with self.subTest(name):
+                self.fails(plan, msg)
+
+    def test_item8_duplicate_slice_number(self):
+        self.fails(HEAD + card(1, "") + card(2, "") + card(2, ""), "duplicate slice number: 2")
+
+    def test_item9_indented_deliver_in_card_prose_is_not_the_header(self):
+        prose = card(1, "").replace("    Do thing 1.\n", "    Do thing 1.\n  deliver: stacked\n")
+        plan = HEAD + "\n" + prose + card(2, "")  # slice 2 has no edge to 1: would fail if stacked
+        self.assertEqual(plan_lint.parse_deliver(plan), "parallel")
+        code, out = lint(plan)
+        self.assertEqual(code, 0, out)
+        self.assertIn("deliver: parallel;", out)
+
+    def test_item10_trailing_whitespace_and_tab_indented_card(self):
+        code, out = lint(HEAD + card(1, "") + card(2, "", "[]  "))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(plan_lint.parse_plan(HEAD + card(1, "") + card(2, "", "[1]   "))[2]["deps"], [1])
+        tabbed = HEAD + ("### Slice 1: one\n- depends-on: []\n- files:\n  - src/f1.py\n"
+                         "- tests:\n  - src/test_f1.py\n- card: |\n\tDo one.\n\n")
+        self.assertEqual(plan_lint.parse_plan(tabbed)[1]["card"], ["Do one."])
+        code, out = lint(tabbed)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("card is empty", out)
+
+    def test_item11_crash_paths_end_in_normal_lint_result(self):
+        plan = HEAD + "\n" + card(1, "") + ident_card(
+            2, "Touch `foo(` and `frobnicate`.", "src/f2.py", "src/test_f2.py")
+        rows = {  # name: (repo files, tracked-then-deleted files, expected substring)
+            "regex metacharacter identifier": (
+                {"pkg/a_test.py": "foo( x\n"}, (), "identifier foo( appears in undeclared test file pkg/a_test.py"),
+            "undecodable test file": (
+                {"pkg/a_test.py": b"\xff\xfe\x80 frobnicate\n"}, (),
+                "identifier frobnicate appears in undeclared test file pkg/a_test.py"),
+            "tracked but deleted test file": (
+                {"pkg/b_test.py": "frobnicate\n"}, ("pkg/gone_test.py",),
+                "identifier frobnicate appears in undeclared test file pkg/b_test.py"),
+        }
+        for name, (files, gone, want) in rows.items():
+            with self.subTest(name):
+                code, out = lint_repo(plan, files, gone)
+                self.assertEqual(code, 0, out)
+                self.assertIn(want, out)
 
 
 def load_check_slice(tc):

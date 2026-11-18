@@ -774,5 +774,21 @@ class Ready(unittest.TestCase):
         self.assertIn("not merged into main", out)
 
 
+    # slice 18 item 6: git merge-base --is-ancestor exits 128 for a missing ref; only 1 means "not merged"
+    def test_s18_parallel_missing_base_ref_fails_naming_base(self):
+        self.stack()
+        plan = plan_text("parallel", self.cards()).replace("Base branch: main", "Base branch: nosuch")
+        rc, out = self.r.run("ready", 2, plan)  # dep branch slice/feat-1 exists, base does not
+        self.assertEqual(rc, 1, out)
+        self.assertIn("nosuch", out)
+        self.assertNotIn("OK", out)
+
+    def test_s18_parallel_missing_dependency_branch_fails_naming_it(self):
+        rc, out = self.r.run("ready", 2, plan_text("parallel", self.cards()))  # nothing stacked
+        self.assertEqual(rc, 1, out)
+        self.assertIn("slice/feat-1", out)
+        self.assertIn("not found", out)
+
+
 if __name__ == "__main__":
     unittest.main()
