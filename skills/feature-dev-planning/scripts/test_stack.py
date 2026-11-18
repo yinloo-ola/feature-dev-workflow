@@ -521,12 +521,29 @@ class LifecycleTest(unittest.TestCase):
 
     def test_marker_scan_matches_only_real_markers_on_added_lines(self):  # item 6
         diff = lambda *lines: "+++ b/f.txt\n" + "".join(f"+{x}\n" for x in lines)  # noqa: E731
-        for line, hit in (("<<<<<<< HEAD", True), ("=======", True), (">>>>>>> theirs", True),
+        for line, hit in (("<<<<<<< HEAD", True), ("=======", False), (">>>>>>> theirs", True),
                           ("<<<<<<<", True), ("<<<<<<<<", False), ("<<<<<< six", False),
                           ("a ======= b", False), ("======== eight", False)):
             with self.subTest(line=line):
                 self.assertEqual(stack.marker_files(diff(line)), {"f.txt"} if hit else set())
         self.assertEqual(stack.marker_files("+++ b/f.txt\n-=======\n ======= ctx\n"), set())
+
+    def test_continue_accepts_a_setext_heading_but_refuses_real_markers(self):  # slice 17 item 1
+        self.conflict()
+        refused = {"full trio": "alpha-1\nbeta\n<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\n",
+                   "only <<<<<<<": "alpha-1\nbeta\n<<<<<<< x\nresolved\n",
+                   "only >>>>>>>": "alpha-1\nbeta\nresolved\n>>>>>>> y\n"}
+        for name, text in refused.items():
+            with self.subTest(name):
+                self.resolve(text)
+                code, _, err = self.run_stack("continue")
+                self.assertEqual(code, 1)
+                self.assertIn("conflict markers remain in a.txt", err)
+                self.assertFalse(self.marker.exists())  # refused before running tests
+        self.resolve("alpha-1\nbeta\nTitle\n=======\n")  # a resolved README: setext heading
+        code, out, _ = self.run_stack("continue")
+        self.assertEqual(code, 0)
+        self.assertIn("tests green: make test", out)
 
     def test_continue_refuses_when_no_test_command_is_found(self):  # item 7
         self.conflict()
