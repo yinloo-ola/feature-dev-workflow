@@ -19,18 +19,25 @@ import sys
 from pathlib import Path
 
 SLICE_RE = re.compile(r"^### Slice (\d+):(.*)$")
-DELIVER_RE = re.compile(r"^deliver:\s*(parallel|stacked)$", re.M)
+DELIVER_RE = re.compile(r"^deliver:\s*(parallel|stacked)$")  # matched per line, same grammar as check_slice
+SLICE_HEAD_RE = re.compile(r"^###\s+slice\b", re.I)  # anything like a slice heading
+DEPS_RE = re.compile(r"^\[([^\]]*)\]$")
 DELETES_RE = re.compile(r"^yes\s*—\s*(\S.*)$")  # captures the reason text
-TEST_RE = re.compile(r"(_test\.(go|py|rs)|\.test\.(ts|tsx|js|mjs)|\.spec\.(ts|tsx))$")
+# must stay byte-identical to TEST_RE in slice-executor/scripts/check_slice.py (a test enforces it)
+TEST_RE = re.compile(r"(^|/)(test_[^/]*\.py|conftest\.py)$|_test\.(go|py|rs)$|\.(test|spec)\.(ts|tsx|js|jsx|mjs)$|(^|/)(tests?|__tests__)/|(Test|Tests)\.(java|kt)$|_spec\.rb$")
 SKIP_DIRS = {"vendor", "node_modules", "dist", "build", "generated"}
 IDENT_RE = re.compile(r"`([^`\s]{4,})`")
 GREP_CAP = 200
 REQUIRED = ("mode", "depends-on", "files", "tests", "card")
 
 
+def deliver_line(text: str):
+    """The first column-0 'deliver:' line, rstripped, or None (same scan as check_slice)."""
+    return next((l.rstrip() for l in text.splitlines() if l.startswith("deliver:")), None)
+
 def parse_deliver(text: str) -> str:
-    """Plan header 'deliver: parallel | stacked'; parallel when omitted."""
-    m = DELIVER_RE.search(text)
+    """Plan header 'deliver: parallel | stacked'; parallel when omitted or invalid (main FAILs it)."""
+    m = DELIVER_RE.match(deliver_line(text) or "")
     return m.group(1) if m else "parallel"
 
 
@@ -85,6 +92,8 @@ def parse_plan(text: str):
     field = None
     for line in text.splitlines():
         m = SLICE_RE.match(line)
+        if not m and SLICE_HEAD_RE.match(line):
+            raise ValueError(f"malformed slice heading: {line}")
         if m:
             num = int(m.group(1))
             if num in slices:
@@ -114,8 +123,10 @@ def parse_plan(text: str):
                 m = DELETES_RE.match(rest)
                 current["deletes"], current["reason"] = rest, m and m.group(1)
             elif key == "depends-on":
-                deps = re.findall(r"\d+", rest)
-                current["deps"] = [int(d) for d in deps]
+                b = DEPS_RE.match(re.sub(r"\s*#.*$", "", rest))
+                if not b:
+                    raise ValueError(f"slice {num}: depends-on must be a bracketed list, got {rest!r}")
+                current["deps"] = [int(d) for d in re.findall(r"\d+", b.group(1))]
             elif key == "files" and rest:
                 current["files"].append(rest)
             elif key == "tests":
@@ -149,9 +160,13 @@ def main():
         print(f"FAIL: {e}")
         return 1
 
-    deliver = parse_deliver(path.read_text())
+    text = path.read_text()
+    deliver = parse_deliver(text)
     errors = []
     warnings = []
+    raw = deliver_line(text)
+    if raw is not None and not DELIVER_RE.match(raw):
+        errors.append(f"deliver must be parallel or stacked, got {raw[len('deliver:'):].strip()!r}")
     if not slices:
         errors.append("no slice cards found (expected '### Slice N: title' blocks)")
 
@@ -199,6 +214,16 @@ def main():
                     f"slices {a} and {b} share files {sorted(overlap)} "
                     "without a dependency edge — add 'depends-on' or re-slice"
                 )
+
+    if deliver == "stacked":  # linear stack: each slice's highest dependency is the one before it
+        for prev, n in zip([None] + nums, nums):
+            deps = slices[n]["deps"] or []
+            if prev is None and deps:
+                errors.append(f"stacked plan: slice {n} is first and must have depends-on [] "
+                              "(stacked branches form one linear chain)")
+            elif prev is not None and max(deps, default=None) != prev:
+                errors.append(f"stacked plan: slice {n} must depend on slice {prev} "
+                              "(stacked branches form one linear chain)")
 
     ratio, chain, note = None, [], ""
     if not errors:
