@@ -98,6 +98,28 @@ class StackTest(unittest.TestCase):
         self.assertIn("slice 2 depends-on [2]", err)
         self.assertIn("edges must point to earlier", err)
 
+    def test_trailing_comment_digits_are_not_dependencies(self):
+        self.plan.write_text(PLAN.replace("### Slice 2: two\n- depends-on: [1]",
+                                          "### Slice 2: two\n- depends-on: [1]  # was 3"))
+        code, out, err = self.run_stack("status")
+        self.assertEqual(code, 0, err)
+        self.assertIn("stack feat on main: 1 -> 2 -> 3", out)
+
+    def test_comment_with_a_valid_earlier_slice_is_ignored(self):
+        old = ("### Slice 3: three (declared before 2: order must still be numeric)\n"
+               "- depends-on: [1]")
+        self.plan.write_text(PLAN.replace(old, old + "  # see 1"))
+        code, out, err = self.run_stack("status")
+        self.assertEqual(code, 0, err)
+        self.assertIn("stack feat on main: 1 -> 2 -> 3", out)
+
+    def test_non_bracketed_dependency_is_refused(self):
+        self.plan.write_text(PLAN.replace("### Slice 2: two\n- depends-on: [1]",
+                                          "### Slice 2: two\n- depends-on: 1"))
+        code, _, err = self.run_stack("status")
+        self.assertEqual(code, 1)
+        self.assertIn("depends-on must be a bracketed list, got '1'", err)
+
     def test_mutating_command_writes_state_with_captured_shas(self):
         code, out, _ = self.run_stack("restack", "--from", "3")  # slice 3 has no branch
         self.assertEqual(code, 0)
