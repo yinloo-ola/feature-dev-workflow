@@ -1,14 +1,20 @@
 """Tests for check_slice.py gates (B7-B11). Each case runs the real script in a temp git repo."""
+import contextlib
+import io
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parent / "check_slice.py"
 GIT_ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import check_slice  # noqa: E402
 
 
 def plan_text(deliver="parallel", cards=None):
@@ -788,6 +794,134 @@ class Ready(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("slice/feat-1", out)
         self.assertIn("not found", out)
+
+
+class ReadyPrState(unittest.TestCase):
+    """Slice 2: a merged PR satisfies a deleted dependency branch (RFC §2, B2/B3).
+
+    cmd_ready runs in-process so gh is stubbed at exactly the two seams the card names:
+    `merged` answers pr_is_merged per branch, and `gh` stands in for shutil.which('gh')
+    (None = gh absent). No test needs a network, a gh binary, or a real pull request; the
+    git side is a real temp repo with a real origin remote."""
+
+    def setUp(self):
+        self._t = tempfile.TemporaryDirectory()
+        self.addCleanup(self._t.cleanup)
+        self.r = Repo(self._t.name)
+        origin = Path(self._t.name) / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        self.r.git("remote", "add", "origin", str(origin))
+        self.r.git("push", "-q", "origin", "main")
+
+    def cards(self):
+        return {1: {"deps": []}, 2: {"deps": [1]}}
+
+    def dep_branch(self, delete=False):
+        """slice/feat-1 pushed but not merged into main; optionally deleted afterwards —
+        the merged-then-cleaned-up dependency B2 is about."""
+        self.r.branch("slice/feat-1")
+        self.r.write("s1.txt", "1\n")
+        self.r.commit("s1")
+        self.r.git("push", "-q", "origin", "slice/feat-1")
+        self.r.git("checkout", "-q", "main")
+        if delete:
+            self.r.git("branch", "-D", "slice/feat-1")
+
+    def ready(self, n, plan, merged=None, gh="/usr/bin/gh"):
+        """(exit code, printed text, pr_is_merged mock) for cmd_ready(n) with gh stubbed."""
+        self.r.plan.write_text(plan, encoding="utf-8")
+        answers = merged or {}
+        out, err = io.StringIO(), io.StringIO()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.r.dir)  # cmd_ready's git calls resolve against the repo
+        with mock.patch.object(check_slice, "pr_is_merged",
+                               side_effect=lambda b: answers.get(b, False)) as pr, \
+                mock.patch.object(check_slice.shutil, "which", return_value=gh), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                check_slice.cmd_ready(str(self.r.plan), n)
+                rc = 0
+            except SystemExit as e:
+                rc = e.code
+        return rc, out.getvalue() + err.getvalue(), pr
+
+    # B2
+    def test_b2_merged_pr_satisfies_deleted_branch(self):
+        self.dep_branch(delete=True)
+        rc, out, pr = self.ready(2, plan_text("parallel", self.cards()),
+                                 merged={"slice/feat-1": True})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("OK: all dependencies of slice 2 merged into main.", out)
+        self.assertEqual([c.args[0] for c in pr.call_args_list], ["slice/feat-1"])  # asked once
+
+    # guard: gh does not say MERGED -> no false pass
+    def test_b2_deleted_branch_with_open_pr_still_fails(self):
+        self.dep_branch(delete=True)
+        rc, out, _ = self.ready(2, plan_text("parallel", self.cards()),
+                                merged={"slice/feat-1": False})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("slice 1: branch slice/feat-1 not found "
+                      "(if merged and deleted, confirm with the orchestrator)", out)
+
+    # guard: an EXISTING unmerged branch is never rescued by gh — gh is not even consulted
+    def test_b2_existing_unmerged_branch_still_fails_and_never_asks_gh(self):
+        self.dep_branch()  # the branch exists; main does not contain it
+        rc, out, pr = self.ready(2, plan_text("parallel", self.cards()),
+                                 merged={"slice/feat-1": True})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("slice 1: branch slice/feat-1 not merged into main", out)
+        self.assertEqual(pr.call_count, 0)
+
+    # B3 ready half: gh absent keeps today's failure, with "install gh" named
+    def test_b3_gh_absent_deleted_branch_fails_naming_install_gh(self):
+        self.dep_branch(delete=True)
+        rc, out, pr = self.ready(2, plan_text("parallel", self.cards()), gh=None)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("slice 1: branch slice/feat-1 not found "
+                      "(if merged and deleted, install gh or confirm with the orchestrator)", out)
+        self.assertEqual(pr.call_count, 0)  # no gh binary to ask
+
+
+class PrIsMerged(unittest.TestCase):
+    """The helper behind B2: only a clean MERGED payload is True. Any doubt is False, so an
+    unreadable PR state can never turn a deleted dependency branch into a pass."""
+
+    def answer(self, returncode, stdout):
+        r = subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+        with mock.patch.object(check_slice.subprocess, "run", return_value=r):
+            return check_slice.pr_is_merged("slice/feat-1")
+
+    def test_only_merged_is_true(self):
+        self.assertTrue(self.answer(0, '{"state":"MERGED"}'))
+        for rc, stdout in ((0, '{"state":"OPEN"}'), (0, '{"state":"CLOSED"}'),
+                           (1, '{"state":"MERGED"}'), (0, "not json"), (0, ""),
+                           (0, '["MERGED"]'), (0, '{"state": null}')):
+            with self.subTest(returncode=rc, stdout=stdout):
+                self.assertFalse(self.answer(rc, stdout))
+
+    def test_missing_gh_binary_is_false(self):
+        with mock.patch.object(check_slice.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertFalse(check_slice.pr_is_merged("slice/feat-1"))
+
+
+class MissingPlan(unittest.TestCase):
+    """Slice 2: a plan path that does not exist fails cleanly instead of raising
+    FileNotFoundError from parse_plan — the .specs/ path is gitignored, so a worktree
+    never has it and the relative path used to die with a traceback."""
+
+    def test_missing_plan_exits_1_empty_stdout_and_no_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Repo(tmp)  # a real repo: the guard must fire before any git work
+            missing = Path(tmp) / "no-such-dir" / "03-plan.md"
+            for mode, n in (("ready", 2), ("verify", 1)):
+                with self.subTest(mode=mode):
+                    r = subprocess.run([sys.executable, str(SCRIPT), mode, str(missing), str(n)],
+                                       cwd=repo.dir, capture_output=True, text=True,
+                                       encoding="utf-8")
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertEqual(r.stdout, "")
+                    self.assertIn(f"error: {missing} not found", r.stderr)
+                    self.assertNotIn("Traceback", r.stderr)
 
 
 if __name__ == "__main__":
