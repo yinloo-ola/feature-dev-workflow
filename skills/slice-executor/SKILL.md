@@ -24,6 +24,13 @@ You have no conversation history and need none; the slice card is your complete 
 
 ## Step 1 — Read the contract
 
+**The plan path must be given to you absolute.** `.specs/` is gitignored, so a fresh worktree
+does not contain it and the relative path `.specs/<feature>/03-plan.md` used throughout this
+document does not resolve once you `cd` into your worktree. Everywhere below that writes
+`.specs/<feature>/03-plan.md`, read it as the absolute path you were handed (or copy the plan
+into your worktree once and use that copy). Passing a relative path to `check_slice.py` or
+`slice_status.py` from inside a worktree fails with `error: ... not found`.
+
 Read, in order:
 
 1. The full slice card for your number, plus the plan header (base branch).
@@ -43,16 +50,18 @@ agent has it; move to the next unclaimed slice.
 From the main checkout (or any checkout of the repo), run:
 
 ```bash
-python3 <skill-dir>/scripts/check_slice.py ready .specs/<feature>/03-plan.md <n>
+python3 <skill-dir>/scripts/check_slice.py ready /abs/path/to/.specs/<feature>/03-plan.md <n>
 ```
 
 What it verifies depends on the plan header's `deliver:` (default `parallel`):
 
 - **`deliver: parallel`** — every `depends-on` slice's branch (`slice/<feature>-<k>`) is
   merged into the base branch. If not ready, report "slice <n> blocked on slice <k>" and
-  stop. If a dependency branch is missing entirely (e.g. after a fresh clone), the merge
-  can't be verified from git — report it and let the orchestrator confirm the merge before
-  you proceed.
+  stop. A dependency branch that is missing entirely is **not** automatically a blocker: it
+  was most likely merged and cleaned up, so `ready` asks gh for that branch's PR and passes
+  when gh reports it MERGED. It fails only when the branch is gone and gh is absent (the
+  message then says `install gh or confirm with the orchestrator`), when gh reports the PR as
+  not merged, or when an existing branch is not an ancestor of the base (genuinely unmerged).
 - **`deliver: stacked`** — each `depends-on` branch exists locally, is pushed
   (`origin/slice/<feature>-<k>` exists), and descends from its own parent slice's pushed
   tip. On failure the script prints which check failed (not found locally / not pushed /
@@ -117,8 +126,11 @@ Run the full verification loop from [references/verification.md](references/veri
 commands), then commit any remaining changes and run the mechanical gates:
 
 ```bash
-python3 <skill-dir>/scripts/check_slice.py verify .specs/<feature>/03-plan.md <n>
+python3 <skill-dir>/scripts/check_slice.py verify /abs/path/to/.specs/<feature>/03-plan.md <n>
 ```
+
+Pass the plan path **absolute**: `.specs/` is gitignored, so your worktree has no copy of it
+and a relative path fails with `error: ... not found`.
 
 The gates check, against the base branch (for deliver: stacked, the parent slice's branch):
 
