@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SLICE_RE = re.compile(r"^### Slice (\d+):")
+DEPS_RE = re.compile(r"^\[([^\]]*)\]$")  # same grammar as plan_lint/check_slice
 MUTATING = ("restack", "continue", "abort", "push")
 RESUMING = ("continue", "abort")  # run mid-conflict: tree is dirty, a rebase is open
 MARKER_RE = re.compile(r"^(<{7}|>{7})( |$)")  # a lone ======= is a setext heading, not a marker
@@ -66,7 +67,11 @@ def parse_plan(path):
             cur = int(m.group(1))
             deps[cur] = []
         elif cur is not None and line.startswith("- depends-on:"):
-            deps[cur] = [int(d) for d in re.findall(r"\d+", line)]
+            rest = re.sub(r"\s*#.*$", "", line[len("- depends-on:"):]).strip()
+            b = DEPS_RE.match(rest)
+            if not b:
+                die(f"{path}: slice {cur}: depends-on must be a bracketed list, got {rest!r}")
+            deps[cur] = [int(d) for d in re.findall(r"\d+", b.group(1))]
     if not deps:
         die(f"{path}: no '### Slice N:' cards found — run plan_lint.py on the plan")
     for n, ds in deps.items():
