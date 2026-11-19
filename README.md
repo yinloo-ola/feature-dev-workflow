@@ -15,6 +15,20 @@ each slice in isolation.
 
   It also ships `stack.py` for restacking slice branches, and the planning skill writes a
   review bundle when a fan-out opens more than 3 PRs.
+  - `slice_status.py` — a read-only, derived status table for a whole plan: one line per slice
+    with one of six states (`merged`, `in review`, `in flight`, `blocked`, `ready`,
+    `not started`), a detail column (the PR number, the worktree holding the claim,
+    `waits on 2, 3`, or a stale claim with the `rmdir` that clears it), and a summary line
+    last so `tail -1` answers "what can I dispatch now". It joins the plan, git, `claims/`
+    and gh at read time and writes nothing.
+
+    ```bash
+    python3 skills/feature-dev-planning/scripts/slice_status.py .specs/<feature>/03-plan.md
+    ```
+
+    `--no-pr` skips gh entirely; so does a checkout without gh, which prints
+    `PR state unavailable — merged is judged by local branch only` and judges `merged` by the
+    local branch alone.
 - **slice-executor** — execute one planned slice in an isolated git worktree and open a small,
   reviewable PR. Stateless; designed to be run by parallel sub-agents. `check_slice.py` runs
   three always-wrong gates and a size report:
@@ -32,8 +46,9 @@ schema, and ships in one PR skips Phase 1: no RFC, no audit document. Write a on
 `03-plan.md` and hand it to `slice-executor`; the gates, the cold-start test, and the
 incidental-test rule still apply.
 `plan_lint.py` accepts a one-card plan, including `deletes-existing: yes` — the slice-1
-foundation rule only applies when there is a fan-out to protect. The plan is committed to the
-base branch and is never edited on the slice branch.
+foundation rule only applies when there is a fan-out to protect. The plan is local working state
+under a gitignored `.specs/`, so it is never committed and never edited while a slice is in
+flight.
 
 ## Delivery shapes
 
@@ -126,18 +141,22 @@ Behavior-to-test map. At 3 PRs or fewer, a review note in each PR body is enough
 
 ## Install
 
+There is no install script. From this repo's root, symlink each skill in `skills/` into
+`~/.agents/skills/` by hand, so edits in this repo are live for the symlinked entries:
+
 ```bash
-./install.sh
+ln -s "$PWD/skills/<name>" ~/.agents/skills/<name>
 ```
 
-Symlinks each skill from `skills/` into `~/.agents/skills/`, so edits in this repo are live
-for the symlinked entries. `install.sh` skips (with a message) any entry that exists and is
-not a symlink; remove that directory first and re-run.
+`$PWD` must be the repo root. Remove any existing real directory at the destination first:
+`ln -s` creates the link *inside* an existing directory rather than replacing it, which silently
+yields `~/.agents/skills/<name>/<name>`. `~/.commandcode/skills/<name>` already symlinks to
+`~/.agents/skills/<name>`, so linking into `~/.agents/skills/` updates both.
 
 ## Development
 
 Requires Python 3.9+ (the scripts are stdlib-only); `git` is required, `gh` is optional
-(PR state in `stack.py status` and `push`).
+(PR state in `stack.py status`, `slice_status.py`, and `check_slice.py ready`).
 
 Run every suite:
 
@@ -150,18 +169,19 @@ Or run one suite directly:
 ```bash
 cd skills/feature-dev-planning/scripts && python3 -m unittest -v test_plan_lint
 cd skills/feature-dev-planning/scripts && python3 -m unittest -v test_stack
+cd skills/feature-dev-planning/scripts && python3 -m unittest -v test_slice_status
 cd skills/slice-executor/scripts     && python3 -m unittest -v test_check_slice
 ```
 
-`test_stack` builds temporary git repositories and takes ~45s; the other two suites
-take a few seconds each.
+`test_stack`, `test_slice_status` and `test_check_slice` build temporary git repositories;
+`test_stack` is the slow one (~50s), the other two take a few seconds each.
 
 ## Layout
 
 ```
 skills/
 ├── feature-dev-planning/
-│   └── scripts/   plan_lint.py, stack.py (+ tests)
+│   └── scripts/   plan_lint.py, stack.py, slice_status.py (+ tests)
 └── slice-executor/
     └── scripts/   check_slice.py (+ tests)
 ```

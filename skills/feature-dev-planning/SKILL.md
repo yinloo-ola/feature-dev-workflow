@@ -6,8 +6,9 @@ description: "Turn a PRD into an RFC and a parallel-safe PR slice plan under .sp
 # Feature Dev Planning
 
 Plan a feature as a sequence of small, independently reviewable, independently executable PRs.
-All state lives in `.specs/<feature>/` in the repo — the highest-numbered doc that exists tells
-you where you are. No other progress tracking exists or is needed.
+All state lives in `.specs/<feature>/` in the working checkout — ignored by git, local to your
+machine — and the highest-numbered doc that exists tells you where you are. No other progress
+tracking exists or is needed.
 
 ```
 .specs/<feature>/
@@ -44,9 +45,11 @@ that changing behavior an existing test asserts obligates declaring that test fi
 scales down is the ceremony — the audit narrative, the coverage ledger, the stress test, the
 sectioned walkthrough, the approval gate — not the verification.
 
-A single-card plan is still a plan: commit it to the base branch before executing the slice, and
-never edit it on the slice branch (the card defines scope, so allowlisting it would defeat the
-scope gate). Amend it on base, then rebase.
+A single-card plan is still a plan: write it to `.specs/<feature>/03-plan.md` before executing
+the slice, and never edit it while the slice is in flight (the card defines scope, so
+allowlisting it would defeat the scope gate). Amend it there, then re-dispatch or rebase.
+`.specs/` is gitignored, so "before executing" means on disk, not committed — see
+"Tracking the plan" below for what that means for durability.
 
 ## Phase 1 — PRD → RFC
 
@@ -131,24 +134,42 @@ After `03-plan.md` lints clean and the foundation slice (slice 1) has landed on 
   the base branch; with `deliver: stacked`, each `depends-on` branch exists, is pushed, and
   descends from its parent's tip. Re-evaluate after each merge. Executors open PRs against the
   base branch (parallel) or the parent slice's branch (stacked).
+- Run `scripts/slice_status.py` to see the whole plan at once instead of re-deriving state per
+  slice: one line per slice with its state, a detail column (PR number, the worktree holding
+  the claim, what a blocked slice waits on, or a stale claim and the `rmdir` that clears it),
+  and a summary line last, so `tail -1` answers "what can I dispatch now". It derives state
+  from git, `claims/` and gh at read time and writes nothing — re-running it is always safe.
+  `--no-pr` skips gh entirely; without gh it prints one line saying PR state is unavailable
+  and judges `merged` by the local branch alone.
 - Spawn one sub-agent per ready slice, each instructed to run the `slice-executor` skill against
   `.specs/<feature>/` and its slice number. You may pre-create worktrees and spawn agents inside
   them, or let each executor create its own — its Step 3 handles both. Either way, never spawn
   two agents into the same checkout. Agents work on branches named `slice/<feature>-<n>` —
-  the branch name is a contract: downstream readiness checks depend on it.
+  the branch name is a contract: downstream readiness checks depend on it. Hand over the plan
+  path **absolute**: `.specs/` is gitignored, so a fresh worktree does not contain it and the
+  relative path does not resolve there.
 - After each slice's PR merges, rebase the remaining worktrees onto the updated base branch and
   have each re-run its verification before continuing (slice-executor documents the
   mid-flight rebase procedure for the agents). Default posture: merge each green, reviewed slice
-  promptly, so any stack that must be rebased stays short. **Never delete slice branches after
-  merge** — local `slice/<feature>-<n>` branches are the merge record that downstream readiness
-  checks depend on (remote deletion by GitHub is fine; the local branch is what's checked).
+  promptly, so any stack that must be rebased stays short. **Keeping a slice branch after merge
+  is a convenience, not a requirement** — `check_slice.py ready` treats a dependency as merged
+  when its PR is merged even if the local branch is gone (it asks gh when the branch is
+  missing). Keep the local `slice/<feature>-<n>` branches if you want `stack.py` output and
+  `merge-base` checks to stay complete; letting GitHub delete the remote copy is safe either
+  way.
 - If an executor reports a card as ambiguous or blocking: fix the card in `03-plan.md`, re-run
   `plan_lint.py`, then re-dispatch. Never resolve ambiguity with verbal instructions to one
   agent — parallel agents won't hear them, and the plan stops matching the code.
 
 ### Tracking the plan
 
-`.specs/<feature>/` is committed and pushed — it is the record of the plan, not scratch space.
+`.specs/<feature>/` is **local working state, not a committed record**: `/.specs/` is in
+`.gitignore`, so nothing in it is tracked by git, pushed, or reviewable in a PR. It is kept for
+the life of the feature and cleared once the feature completes — scratch space that happens to
+be long-lived. Because it is gitignored it is also absent from every fresh worktree, so anything
+run from a worktree must be handed the plan path **absolute**. Anything that must outlive the
+feature belongs in the PR description (and the merged code): the goal, the decisions, the
+Behavior→test mapping.
 A card fix appends a line to that card, `amended: <date> — <reason>` (append-only, like the RFC
 change log; never rewrite history). After any card fix, either re-dispatch or explicitly confirm
 reconciliation with every affected executor — an executor holding the old card is working to a
