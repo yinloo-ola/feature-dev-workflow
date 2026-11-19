@@ -315,8 +315,8 @@ def plan_lines(cmd, state, feature, start, restack_from=None):
         i = order.index(n)
         parent = f"slice/{feature}-{order[i - 1]}" if i else base
         if cmd == "restack":
-            lines.append(f"rebase {branch} onto {parent}"
-                         + (f" (base_old {(fork_base(parent, branch) or "?")[:7]})" if s["orig_sha"] else ""))
+            base_old = f" (base_old {(fork_base(parent, branch) or '?')[:7]})" if s["orig_sha"] else ""
+            lines.append(f"rebase {branch} onto {parent}" + base_old)
         elif cmd == "push" and restack_from is not None and n >= restack_from:
             continue  # the restack would rewrite it: its push line is unknowable until then
         elif cmd == "push":
