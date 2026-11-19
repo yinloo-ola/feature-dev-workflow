@@ -1,8 +1,10 @@
-"""Tests for plan_lint.py — rows map to RFC Behaviors B1-B6 (slice-execution-v2)."""
+"""Tests for plan_lint.py — rows map to RFC Behaviors B1-B5 (slice-execution-v2).
+
+B6 (the identifier grep) is retired: it only fired on cards that happened to backtick
+identifiers, so in practice it never fired at all."""
 import contextlib
 import importlib.util
 import io
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -49,36 +51,6 @@ def fan_plan(n, deliver=""):
     """Foundation 1 plus cards 2..n that all depend only on [1]."""
     return HEAD + deliver + "\n" + card(1, "") + "".join(card(i, "", "[1]") for i in range(2, n + 1))
 
-def ident_card(n, body, files, tests):
-    return (f"### Slice {n}: title {n}\n- depends-on: []\n- files:\n  - {files}\n"
-            f"- tests:\n  - {tests}\n- card: |\n    {body}\n\n")
-
-def lint_repo(plan, repo_files, tracked_deleted=()):
-    """Lint plan_text at <tmp>/.specs/f/03-plan.md inside a git repo holding repo_files
-    (str or bytes content); tracked_deleted files are git-added, then removed from disk."""
-    with tempfile.TemporaryDirectory() as d:
-        root = Path(d)
-        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-        for rel, text in repo_files.items():
-            (root / rel).parent.mkdir(parents=True, exist_ok=True)
-            (root / rel).write_bytes(text if isinstance(text, bytes) else text.encode())
-        for rel in tracked_deleted:
-            (root / rel).parent.mkdir(parents=True, exist_ok=True)
-            (root / rel).write_text("x\n")
-            subprocess.run(["git", "add", rel], cwd=root, check=True)
-            (root / rel).unlink()
-        (root / ".specs/f").mkdir(parents=True)
-        p = root / ".specs/f/03-plan.md"
-        p.write_text(plan)
-        out, argv = io.StringIO(), sys.argv
-        sys.argv = ["plan_lint.py", str(p)]
-        try:
-            with contextlib.redirect_stdout(out):
-                code = plan_lint.main()
-        finally:
-            sys.argv = argv
-    return code, out.getvalue()
-
 class PlanLintV2(unittest.TestCase):
     def test_b1_v2_plan_passes_with_shape_line(self):
         code, out = lint(V2_PLAN)
@@ -86,16 +58,16 @@ class PlanLintV2(unittest.TestCase):
         self.assertIn("3 slices; deliver: stacked; deletes-existing: 1;", out)
         self.assertNotIn("WARN", out)
 
-    def test_b2_legacy_plan_passes_with_warn_per_card(self):
+    def test_b2_legacy_plan_passes_with_one_warn(self):
         code, out = lint(LEGACY_PLAN)
         self.assertEqual(code, 0, out)
-        self.assertEqual(out.count("legacy mode field — v2 plans use deletes-existing"), 3)
+        self.assertEqual(out.count("legacy mode field"), 1, out)
         self.assertIn("deliver: parallel; deletes-existing: 0;", out)  # defaults
 
     def test_failures(self):
         rows = {
             "B3 slice 1 yes": (
-                HEAD + card(1, "- deletes-existing: yes — rewrites the base\n"),
+                HEAD + card(1, "- deletes-existing: yes — rewrites the base\n") + card(2, "", "[1]"),
                 "slice 1 is the foundation — deletes-existing must be no"),
             "B4 yes without reason": (
                 HEAD + card(1, "") + card(2, "- deletes-existing: yes\n"),
@@ -112,6 +84,19 @@ class PlanLintV2(unittest.TestCase):
                 code, out = lint(plan)
                 self.assertEqual(code, 1, out)
                 self.assertIn(msg, out)
+
+    def test_single_card_plan_may_delete(self):
+        """A one-card plan has no foundation to protect: deletes-existing: yes passes."""
+        for label, deletes in (
+            ("no", "- deletes-existing: no\n"),
+            ("omitted", ""),
+            ("yes", "- deletes-existing: yes — Refresh now returns ErrNoSession\n"),
+        ):
+            with self.subTest(label):
+                code, out = lint(HEAD + "\n" + card(1, deletes))
+                self.assertEqual(code, 0, out)
+                self.assertNotIn("foundation", out)
+                self.assertIn("1 slice;", out)
 
     def test_parse_captures_reason_and_deliver(self):
         slices = plan_lint.parse_plan(V2_PLAN)
@@ -171,57 +156,72 @@ class PlanShape(unittest.TestCase):
                 self.assertEqual(code, 0, out)
                 self.assertEqual("pipeline, not parallel plan" in out, warns, out)
 
-class IdentifierGrep(unittest.TestCase):
-    """B6: undeclared-test blast radius."""
-    PLAN = (HEAD + "\n" + card(1, "") + ident_card(
-        2, "Rename `frobnicate` and `a/b/frobnicate.py` and `abc`.", "src/f2.py", "src/test_f2.py"))
+class WarnChannel(unittest.TestCase):
+    """Warnings are reported once per fact, and a shape question can be answered."""
 
-    def test_b6_undeclared_test_file_warns_naming_both(self):
-        code, out = lint_repo(self.PLAN, {"pkg/foo_test.py": "frobnicate()\n",
-                                          "src/test_f2.py": "frobnicate()\n"})
+    def test_legacy_warn_is_reported_once_for_the_plan(self):
+        code, out = lint(LEGACY_PLAN)
         self.assertEqual(code, 0, out)
-        self.assertIn("WARN: slice 2: identifier frobnicate appears in undeclared test file "
-                      "pkg/foo_test.py — add pkg/foo_test.py to tests or note the required "
-                      "update", out)
-        self.assertNotIn("a/b/frobnicate.py", out)  # path-like excluded
-        self.assertNotIn("identifier abc", out)  # shorter than 4
+        self.assertEqual(out.count("legacy mode field"), 1, out)
+        self.assertIn("legacy mode field on 3 slices", out)
 
-    def test_b6_no_warn_rows(self):
-        rows = {
-            "declared test file": {"pkg/foo_test.py": "x\n", "src/test_f2.py": "frobnicate()\n",
-                                   "src/f2.py": "frobnicate"},
-            "non-test file only": {"pkg/foo.py": "frobnicate()\n"},
-            "node_modules test excluded": {"node_modules/x/a.test.js": "frobnicate()\n"},
-            "no match": {"pkg/foo_test.go": "other()\n"},
-            "substring is not a match": {"pkg/foo_test.go": "frobnicated()\n"},
-        }
-        for name, files in rows.items():
-            with self.subTest(name):
-                code, out = lint_repo(self.PLAN, files)
-                self.assertEqual(code, 0, out)
-                self.assertNotIn("WARN", out)
-
-    def test_b6_test_file_patterns(self):
-        for f in ("a_test.go", "a_test.py", "a.test.ts", "a.test.tsx", "a.test.js", "a.test.mjs",
-                  "a.spec.ts", "a.spec.tsx", "a_test.rs"):
-            with self.subTest(f):
-                code, out = lint_repo(self.PLAN, {f: "frobnicate\n"})
-                self.assertIn(f"undeclared test file {f}", out)
-
-    def test_b6_not_a_git_repo_skips_with_note(self):
-        code, out = lint(self.PLAN)  # plain temp dir
+    def test_legacy_warn_singular(self):
+        code, out = lint(HEAD + "\n" + card(1, "- mode: additive\n"))
         self.assertEqual(code, 0, out)
-        self.assertIn("identifier grep skipped (not a git repo)", out)
+        self.assertIn("legacy mode field on 1 slice —", out)
+
+    def test_no_legacy_warn_for_v2_plan(self):
+        code, out = lint(V2_PLAN)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("legacy mode field", out)
+
+    def test_shape_ack_suppresses_warn_and_echoes_reason(self):
+        acked = (HEAD + "shape-ack: chains are per-file; each link merges independently\n\n"
+                 + chain_plan(7, "").split("\n\n", 1)[1])
+        code, out = lint(acked)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("WARN: pipeline", out)
+        self.assertIn("shape-ack: chains are per-file; each link merges independently", out)
+
+    def test_shape_ack_does_not_suppress_other_warns(self):
+        acked = (HEAD + "shape-ack: accepted\n\n"
+                 + chain_plan(7, "").split("\n\n", 1)[1] + card(8, "- mode: additive\n"))
+        code, out = lint(acked)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("WARN: pipeline", out)
+        self.assertIn("legacy mode field on 1 slice", out)
+
+    def test_shape_ack_ignored_when_shape_is_fine(self):
+        plan = HEAD + "shape-ack: not needed here\n\n" + fan_plan(4).split("\n\n", 1)[1]
+        code, out = lint(plan)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("shape-ack:", out.split("OK:")[0])
         self.assertNotIn("WARN", out)
 
-    def test_b6_cap_noted_in_ok_line(self):
-        idents = " ".join(f"`ident{i:04d}`" for i in range(250))
-        plan = HEAD + "\n" + ident_card(1, idents, "src/f1.py", "src/test_f1.py")
-        code, out = lint_repo(plan, {"pkg/a_test.py": "ident0000 ident0249\n"})
+    def test_shape_ack_needs_reason_text(self):
+        """A bare 'shape-ack:' with no reason is not an acknowledgment."""
+        acked = (HEAD + "shape-ack:\n\n" + chain_plan(7, "").split("\n\n", 1)[1])
+        code, out = lint(acked)
         self.assertEqual(code, 0, out)
-        self.assertIn("identifier ident0000 appears", out)
-        self.assertNotIn("identifier ident0249", out)  # past the cap
-        self.assertIn("identifier grep capped at 200", out.splitlines()[-1])
+        self.assertIn("WARN: pipeline", out)
+
+    def test_shape_ack_first_line_wins(self):
+        acked = (HEAD + "shape-ack: first reason\nshape-ack: second reason\n\n"
+                 + chain_plan(7, "").split("\n\n", 1)[1])
+        code, out = lint(acked)
+        self.assertIn("shape-ack: first reason", out)
+        self.assertNotIn("second reason", out)
+
+    def test_shape_warn_suppressed_when_plan_has_errors(self):
+        """Shape is a judgement about a valid plan; a broken plan reports the breakage."""
+        good = chain_plan(7)
+        code, out = lint(good)
+        self.assertEqual(code, 0, out)
+        self.assertIn("WARN: pipeline", out)
+        code, out = lint(good + card(9, "", "[42]"))
+        self.assertEqual(code, 1, out)
+        self.assertIn("depends-on 42 does not exist", out)
+        self.assertNotIn("WARN: pipeline", out)
 
 
 def shared_card(n, deps):
@@ -317,9 +317,6 @@ class PlanLintFixes(unittest.TestCase):
         code, out = lint(chain_plan(3))
         self.assertIn("parallelizable immediately: none (all sequenced)", out)
 
-    def test_item1_test_re_is_check_slice_test_re(self):
-        self.assertEqual(plan_lint.TEST_RE.pattern, load_check_slice(self).TEST_RE.pattern)
-
     def test_item1_parsers_agree_on_fixture_plans(self):
         cs = load_check_slice(self)
 
@@ -405,25 +402,6 @@ class PlanLintResidual(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertNotIn("card is empty", out)
 
-    def test_item11_crash_paths_end_in_normal_lint_result(self):
-        plan = HEAD + "\n" + card(1, "") + ident_card(
-            2, "Touch `foo(` and `frobnicate`.", "src/f2.py", "src/test_f2.py")
-        rows = {  # name: (repo files, tracked-then-deleted files, expected substring)
-            "regex metacharacter identifier": (
-                {"pkg/a_test.py": "foo( x\n"}, (), "identifier foo( appears in undeclared test file pkg/a_test.py"),
-            "undecodable test file": (
-                {"pkg/a_test.py": b"\xff\xfe\x80 frobnicate\n"}, (),
-                "identifier frobnicate appears in undeclared test file pkg/a_test.py"),
-            "tracked but deleted test file": (
-                {"pkg/b_test.py": "frobnicate\n"}, ("pkg/gone_test.py",),
-                "identifier frobnicate appears in undeclared test file pkg/b_test.py"),
-        }
-        for name, (files, gone, want) in rows.items():
-            with self.subTest(name):
-                code, out = lint_repo(plan, files, gone)
-                self.assertEqual(code, 0, out)
-                self.assertIn(want, out)
-
 
 def load_check_slice(tc):
     path = Path(__file__).resolve().parents[2] / "slice-executor/scripts/check_slice.py"
@@ -433,72 +411,6 @@ def load_check_slice(tc):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
-
-
-class IdentifierGrepBoundaries(unittest.TestCase):
-    """Slice 15 item 6: pin the identifier grep's boundaries."""
-
-    def warns(self, body, repo, files="src/f2.py", tests="src/test_f2.py"):
-        plan = HEAD + "\n" + card(1, "") + ident_card(2, body, files, tests)
-        code, out = lint_repo(plan, repo)
-        self.assertEqual(code, 0, out)
-        return out
-
-    def test_repeated_identifier_warns_once(self):
-        out = self.warns("`frobnicate` then `frobnicate` again", {"pkg/a_test.py": "frobnicate\n"})
-        self.assertEqual(out.count("WARN: slice 2: identifier frobnicate"), 1, out)
-
-    def test_cap_boundary_200_vs_201(self):
-        def idents(n):
-            return " ".join(f"`ident{i:04d}`" for i in range(n))
-        repo = {"pkg/a_test.py": "ident0199 ident0200\n"}
-        out = self.warns(idents(200), repo)
-        self.assertIn("identifier ident0199 appears", out)
-        self.assertNotIn("capped", out)
-        out = self.warns(idents(201), repo)
-        self.assertIn("identifier ident0199 appears", out)
-        self.assertNotIn("identifier ident0200", out)
-        self.assertIn("identifier grep capped at 200", out.splitlines()[-1])
-
-    def test_slash_identifiers_skipped_and_not_counted(self):
-        repo = {"pkg/a_test.py": "src/x/foo.py ident0000\n"}
-        out = self.warns("`src/x/foo.py`", repo)
-        self.assertNotIn("WARN", out)  # path-like text is skipped even when a test mentions it
-        body = " ".join(f"`ident{i:04d}`" for i in range(200)) + " `src/x/foo.py`"
-        out = self.warns(body, repo)
-        self.assertNotIn("capped", out)  # a skipped identifier costs no grep
-
-    def test_identifier_length_boundary(self):
-        out = self.warns("`abc` and `abcd`", {"pkg/a_test.py": "abc abcd\n"})
-        self.assertIn("identifier abcd appears", out)
-        self.assertNotIn("identifier abc appears", out)
-
-    def test_declared_files_and_tests_both_excluded(self):
-        out = self.warns("`frobnicate`", {"pkg/a_test.py": "frobnicate\n", "pkg/z_test.py": "frobnicate\n"},
-                         files="pkg/a_test.py")  # declared under files
-        self.assertIn("undeclared test file pkg/z_test.py", out)
-        self.assertNotIn("test file pkg/a_test.py", out)
-        out = self.warns("`frobnicate`", {"pkg/a_test.py": "frobnicate\n", "pkg/z_test.py": "frobnicate\n"},
-                         tests="pkg/a_test.py")  # declared under tests
-        self.assertIn("undeclared test file pkg/z_test.py", out)
-        self.assertNotIn("test file pkg/a_test.py", out)
-
-    def test_shape_and_identifier_warns_suppressed_when_plan_has_errors(self):
-        body = ident_card(8, "`frobnicate`", "src/f8.py", "src/test_f8.py")
-        good = chain_plan(7) + body
-        repo = {"pkg/a_test.py": "frobnicate\n"}
-        code, out = lint_repo(good, repo)  # control: both warns appear without the error
-        self.assertEqual(code, 0, out)
-        self.assertIn("WARN: pipeline", out)
-        self.assertIn("WARN: slice 8: identifier frobnicate", out)
-        code, out = lint_repo(good + card(9, "", "[42]"), repo)
-        self.assertEqual(code, 1, out)
-        self.assertIn("depends-on 42 does not exist", out)
-        self.assertNotIn("WARN", out)
-
-    def test_test_files_named_test_star_are_scanned(self):
-        out = self.warns("`frobnicate`", {"pkg/test_thing.py": "frobnicate\n"})
-        self.assertIn("undeclared test file pkg/test_thing.py", out)
 
 
 if __name__ == "__main__":

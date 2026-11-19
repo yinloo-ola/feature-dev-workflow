@@ -11,10 +11,10 @@ complete on its own.
 
 Base branch: main
 deliver: parallel
+shape-ack: <only to accept a pipeline shape — see field rules>
 Stack: <from 02-rfc.md, only when stated — polyglot/greenfield cases>
 
 ### Slice 1: <imperative title, one reviewable decision>
-- mode: additive
 - deletes-existing: no
 - depends-on: []
 - files:
@@ -37,10 +37,17 @@ Structural rules are enforced mechanically by the linter; the zero-ambiguity rul
 procedural — enforced by the cold-start test and by slice-executor's stop-and-report rule.
 
 - Plan header `deliver`: `parallel` | `stacked` (default `parallel` when omitted).
-- `mode`: LEGACY, advisory — still accepted (the linter prints a WARN), never gating. The v2
-  field is `deletes-existing`: `no` (default, may be omitted) | `yes — <what and why>` (must
-  carry reason text after `yes —`). Slice 1 must be `no`. The example above shows both forms
-  accepted. Any card whose diff deletes existing lines declares `deletes-existing: yes`.
+- Plan header `shape-ack`: `<reason>` — the recorded decision to ship a pipeline shape. The
+  linter warns when the fan-out ratio is below 30% or the longest chain exceeds 5 cards. That
+  WARN is a question with three answers: collapse sequential cards, declare `deliver: stacked`,
+  or — when the chain is genuinely right — record why with `shape-ack`. An acknowledgment
+  without reason text is not an acknowledgment. Ignoring the WARN is the one answer that
+  leaves no trace.
+- `mode`: LEGACY, advisory — still accepted (the linter reports it once for the plan), never
+  gating. The v2 field is `deletes-existing`: `no` (default, may be omitted) | `yes — <what and
+  why>` (must carry reason text after `yes —`). In a multi-slice plan slice 1 must be `no`; a
+  one-card plan has no foundation to protect and may declare deletions. Any card whose diff
+  deletes existing lines declares `deletes-existing: yes`.
 - `depends-on`: slice numbers that must be **merged** before this slice starts. Empty `[]`
   means parallelizable immediately. Add an edge for semantic dependencies (this slice needs
   that slice's behavior to exist), not just file overlap. When in doubt, add the edge.
@@ -65,6 +72,9 @@ procedural — enforced by the cold-start test and by slice-executor's stop-and-
    dependency edge between them fail the linter. Resolve by adding an edge or re-slicing.
 5. **Foundation first.** Slice 1 is the additive base (shared schema/endpoints/interfaces) that
    all parallel branches cut from. Fan-out begins only after slice 1 lands on the base branch.
+   This rule exists to protect a fan-out, so a **one-card plan is exempt** from the slice-1
+   `deletes-existing: no` requirement: with no other slices to break, the single PR may
+   declare deletions like any other card. See the single-card plan under "Slice plan shapes".
 6. **Cold-start test.** Before writing the plan off, read each card as if you've never seen the
    feature. If a competent dev would need to ask a question to ship it, the card is incomplete —
    fold the answer in.
@@ -89,3 +99,35 @@ procedural — enforced by the cold-start test and by slice-executor's stop-and-
 5. Present the plan with the dependency graph in one line, e.g.
    `1 → {2, 3} → 4 → 5(contract)`, and the wall-clock implication
    ("slices 2 and 3 can run in parallel; 4 waits for both").
+
+## Slice plan shapes
+
+Two shapes share one grammar, and both are linted and gated the same way:
+
+**Multi-slice plan** — the default. Phase 1 produces an RFC, Phase 2 slices it. Slice 1 is the
+foundation and must be additive; the rest fan out from it.
+
+**Single-card plan** — one slice, one PR, for a change that Step 0 of the skill sized as
+no / no / yes. It skips Phase 1: there is no RFC and no audit document. The card is the whole
+spec, so the cold-start test carries the weight that the RFC would otherwise carry.
+
+```markdown
+# Plan: <fix-name>
+
+Base branch: main
+deliver: parallel
+
+### Slice 1: <imperative title, one reviewable decision>
+- deletes-existing: no                 # or "yes — <what and why>"; allowed here
+- depends-on: []
+- files:
+  - <the one or few product files this changes>
+- tests:
+  - <the test file, or "none" with a justification in the card>
+- card: |
+    Goal, exact identifiers/signatures, error behavior, and acceptance criteria.
+```
+
+The plan is committed to the base branch before the slice executes, and is never edited on the
+slice branch — the card defines scope, so an editable card would defeat the scope gate. Amend
+on base, then rebase.

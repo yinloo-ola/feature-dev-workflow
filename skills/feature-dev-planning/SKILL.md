@@ -1,6 +1,6 @@
 ---
 name: feature-dev-planning
-description: "Turn a PRD into an RFC and a parallel-safe PR slice plan under .specs/{feature}/ (01-prd.md, 02-rfc.md, 03-plan.md). Use when the user provides a PRD, feature request, or spec and wants it planned, broken into small reviewable PRs, or prepared for parallel slice execution by sub-agents. Covers Phase 1 (PRD interrogation + RFC draft) and Phase 2 (slicing with dependency edges). Execution of individual slices is handled by the slice-executor skill."
+description: "Turn a PRD into an RFC and a parallel-safe PR slice plan under .specs/{feature}/ (01-prd.md, 02-rfc.md, 03-plan.md). Use when the user provides a PRD, feature request, or spec and wants it planned, broken into small reviewable PRs, or prepared for parallel slice execution by sub-agents. Covers Step 0 sizing (a small change gets a single-card plan with no RFC), Phase 1 (PRD interrogation + RFC draft) and Phase 2 (slicing with dependency edges). Execution of individual slices is handled by the slice-executor skill."
 ---
 
 # Feature Dev Planning
@@ -21,6 +21,32 @@ Never start Phase 2 before the user approves the RFC — and approval is only va
 **zero open questions**: each one answered, explicitly accepted as an assumption, or
 deferred-as-scope with the user's sign-off of its recorded consequence (see the dispositions
 in [references/rfc.md](references/rfc.md)). Never fan out before PR 1 (the foundation) has landed on the base branch.
+
+## Step 0 — Size the change before planning it
+
+Not every request is a feature. Ask these three questions about the request; the answers pick
+the path, and the user does not have to know which one to choose:
+
+1. Does it delete or change behavior something else already relies on?
+2. Does it cross an external contract, a schema, or a migration?
+3. Can it ship as one PR?
+
+**No / no / yes → single-card plan.** Skip Phase 1 entirely. Write one card — a one-slice
+`03-plan.md` (see [references/slices.md](references/slices.md) for the card format) — and hand
+it to `slice-executor`. The cold-start test still applies: the card is the whole spec, so it
+must be complete. This path is for a bug fix with a test, a small refactor, a doc correction,
+a log line.
+
+**Any yes → full RFC + slice plan.** Run Phase 1 and Phase 2 below.
+
+Mandatory on every path: the `check_slice.py` gates (scope, deletions, tests) and the rule
+that changing behavior an existing test asserts obligates declaring that test file. What
+scales down is the ceremony — the audit narrative, the coverage ledger, the stress test, the
+sectioned walkthrough, the approval gate — not the verification.
+
+A single-card plan is still a plan: commit it to the base branch before executing the slice, and
+never edit it on the slice branch (the card defines scope, so allowlisting it would defeat the
+scope gate). Amend it on base, then rebase.
 
 ## Phase 1 — PRD → RFC
 
@@ -64,8 +90,7 @@ rules. Summary of the rules that are enforced, not advisory:
 - **Chains collapse.** A slice that only continues the previous slice's files or behavior was
   split for line count, not review — merge it into its predecessor.
 - **Existing tests are declared.** Changing behavior an existing test asserts obligates listing
-  that test file under the card's `tests:`; the linter warns when a card names an identifier
-  that appears in an undeclared test file.
+  that test file under the card's `tests:`.
 - **Every slice independently green and mergeable.** If slice N only makes sense with slice N+1
   applied, re-slice.
 - **Disjoint file sets across parallel slices.** Two slices that need the same file are not
@@ -87,9 +112,12 @@ python3 <skill-dir>/scripts/plan_lint.py .specs/<feature>/03-plan.md
 
 The linter enforces: required card fields, the `Base branch:` header, file overlap without a
 dependency edge, backward-only dependencies (which makes cycles structurally impossible),
-`deletes-existing` grammar, and that slice 1 declares `deletes-existing: no`. It also prints
-WARNs (never failures): legacy `mode:`, plan shape (fan-out ratio, longest chain), and card
-identifiers found in undeclared test files. Fix failures in the plan — never waive the linter. For
+`deletes-existing` grammar, and that slice 1 declares `deletes-existing: no` (multi-slice plans
+only). It also prints WARNs (never failures): legacy `mode:` (once for the plan, not per card)
+and plan shape (fan-out ratio, longest chain). A shape WARN is a question — answer it by
+collapsing cards, declaring `deliver: stacked`, or recording the decision in the plan header as
+`shape-ack: <reason>`, which silences the WARN and keeps the reason in the plan. Fix failures in
+the plan — never waive the linter. For
 idioms to follow in cards (additive-first, one path per behavior, test-covered,
 at-least-once execution), read [references/idioms.md](references/idioms.md).
 

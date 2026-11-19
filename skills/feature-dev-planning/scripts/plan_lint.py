@@ -3,18 +3,19 @@
 
 Enforces the contract between feature-dev-planning and slice-executor:
   - every slice card has the required fields
-  - slice 1 exists and keeps deletes-existing: no (the foundation)
+  - in a multi-slice plan, slice 1 keeps deletes-existing: no (the foundation);
+    a one-card plan has no foundation to protect, so it may declare deletions
   - deletes-existing is 'no' or 'yes — <what and why>'; mode: is legacy, advisory
   - depends-on references exist and the graph is acyclic
   - parallel slices (no edge between them) declare disjoint file sets
-  - WARN (never fail): plan shape (fan-out ratio, longest chain) and card identifiers
-    that appear in test files the card does not declare
+  - WARN (never fail): plan shape (fan-out ratio, longest chain), suppressed when the
+    header records a 'shape-ack: <reason>' decision; legacy mode: fields are reported
+    once for the whole plan, not once per card
 
 Usage: plan_lint.py <path-to-03-plan.md>
 Exit 0 = plan is valid. Exit 1 = failures (printed).
 """
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -23,11 +24,7 @@ DELIVER_RE = re.compile(r"^deliver:\s*(parallel|stacked)$")  # matched per line,
 SLICE_HEAD_RE = re.compile(r"^###\s+slice\b", re.I)  # anything like a slice heading
 DEPS_RE = re.compile(r"^\[([^\]]*)\]$")
 DELETES_RE = re.compile(r"^yes\s*—\s*(\S.*)$")  # captures the reason text
-# must stay byte-identical to TEST_RE in slice-executor/scripts/check_slice.py (a test enforces it)
-TEST_RE = re.compile(r"(^|/)(test_[^/]*\.py|conftest\.py)$|_test\.(go|py|rs)$|\.(test|spec)\.(ts|tsx|js|jsx|mjs)$|(^|/)(tests?|__tests__)/|(Test|Tests)\.(java|kt)$|_spec\.rb$")
-SKIP_DIRS = {"vendor", "node_modules", "dist", "build", "generated"}
-IDENT_RE = re.compile(r"`([^`\s]{4,})`")
-GREP_CAP = 200
+SHAPE_ACK_RE = re.compile(r"^shape-ack:\s*(\S.*)$")  # recorded decision to accept the shape
 REQUIRED = ("mode", "depends-on", "files", "tests", "card")
 
 
@@ -52,37 +49,13 @@ def shape(slices):
     roots = sum(1 for d in eff.values() if not d)
     return (roots / len(eff) if eff else None), longest
 
-def undeclared_test_warnings(plan_dir, slices):
-    """(warnings, note). Cards' backticked identifiers vs test files the card doesn't declare."""
-    try:
-        root = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=plan_dir,
-                              capture_output=True, text=True, check=True).stdout.strip()
-        files = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=root,
-                               capture_output=True, text=True, check=True).stdout.splitlines()
-    except (OSError, subprocess.CalledProcessError):
-        return [], "identifier grep skipped (not a git repo)"
-    tests = {}  # path -> text, read once
-    for f in files:
-        if TEST_RE.search(f) and not SKIP_DIRS & set(f.split("/")):
-            try:
-                tests[f] = (Path(root) / f).read_text(errors="ignore")
-            except OSError:
-                pass
-    warns, greps = [], 0
-    for num, s in sorted(slices.items()):
-        declared = set(s["files"]) | set(s["tests"])
-        for ident in dict.fromkeys(IDENT_RE.findall(" ".join(s["card"]))):
-            if "/" in ident:
-                continue
-            if greps >= GREP_CAP:
-                return warns, f"identifier grep capped at {GREP_CAP}"
-            greps += 1  # one search of the test corpus per identifier
-            pat = re.compile(r"(?<!\w)" + re.escape(ident) + r"(?!\w)")
-            hit = next((f for f, t in tests.items() if f not in declared and pat.search(t)), None)
-            if hit:
-                warns.append(f"slice {num}: identifier {ident} appears in undeclared test file "
-                             f"{hit} — add {hit} to tests or note the required update")
-    return warns, ""
+def shape_ack(text: str):
+    """The plan's recorded decision to accept a pipeline shape, or None.
+
+    A shape WARN is a question. Answering it in the header turns the WARN off; the
+    answer stays in the plan as the record of why the plan is shaped that way."""
+    return next((m.group(1).strip() for l in text.splitlines()
+                 if (m := SHAPE_ACK_RE.match(l.rstrip()))), None)
 
 def parse_plan(text: str):
     """Return {num: {title, mode, deps, files, tests, card}} preserving order."""
@@ -164,6 +137,7 @@ def main():
     deliver = parse_deliver(text)
     errors = []
     warnings = []
+    legacy = 0
     raw = deliver_line(text)
     if raw is not None and not DELIVER_RE.match(raw):
         errors.append(f"deliver must be parallel or stacked, got {raw[len('deliver:'):].strip()!r}")
@@ -175,7 +149,7 @@ def main():
         if not s["title"]:
             errors.append(f"{label}: missing title")
         if s["mode"] is not None:
-            warnings.append(f"{label}: legacy mode field — v2 plans use deletes-existing")
+            legacy += 1
         if s["deletes"] != "no" and not s["reason"]:
             errors.append(f"{label}: deletes-existing must be 'no' or 'yes — <what and why>' "
                           f"(reason text required after 'yes —'), got {s['deletes']!r}")
@@ -195,7 +169,7 @@ def main():
         if not any(s["card"]):
             errors.append(f"{label}: card is empty (fails the cold-start test)")
 
-    if 1 in slices and slices[1]["deletes"] != "no":
+    if len(slices) > 1 and 1 in slices and slices[1]["deletes"] != "no":
         errors.append("slice 1 is the foundation — deletes-existing must be no")
 
     # Note: deps must reference earlier slices (enforced above), which makes
@@ -225,7 +199,11 @@ def main():
                 errors.append(f"stacked plan: slice {n} must depend on slice {prev} "
                               "(stacked branches form one linear chain)")
 
-    ratio, chain, note = None, [], ""
+    if legacy:
+        warnings.append(f"legacy mode field on {legacy} slice{'s' if legacy != 1 else ''} — "
+                        "v2 plans use deletes-existing")
+
+    ratio, chain = None, []
     if not errors:
         ratio, chain = shape(slices)
         order = " → ".join(map(str, chain))
@@ -233,11 +211,14 @@ def main():
             if chain:
                 print(f"chain order: {order}")
         elif ratio is not None and (ratio < 0.3 or len(chain) > 5):
-            warnings.append(f"pipeline, not parallel plan (fan-out {ratio:.0%}, longest chain "
-                            f"{len(chain)}) — collapse sequential cards or declare deliver: "
-                            f"stacked (chain: {order})")
-        w, note = undeclared_test_warnings(path.resolve().parent, slices)
-        warnings += w
+            ack = shape_ack(text)
+            if ack:
+                print(f"shape-ack: {ack}")
+            else:
+                warnings.append(f"pipeline, not parallel plan (fan-out {ratio:.0%}, longest chain "
+                                f"{len(chain)}) — collapse sequential cards, declare deliver: "
+                                f"stacked, or record the decision as 'shape-ack: <reason>' "
+                                f"(chain: {order})")
     for w in warnings:
         print(f"WARN: {w}")
     if errors:
@@ -251,8 +232,7 @@ def main():
     print(f"OK: {path} — {n_label}; deliver: {deliver}; "
           f"deletes-existing: {n_del}; parallelizable immediately: "
           f"{sorted(parallel) if parallel else 'none (all sequenced)'}; "
-          f"fan-out {'n/a' if ratio is None else format(ratio, '.0%')}, longest chain {len(chain)}"
-          + (f"; {note}" if note else ""))
+          f"fan-out {'n/a' if ratio is None else format(ratio, '.0%')}, longest chain {len(chain)}")
     return 0
 
 

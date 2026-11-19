@@ -9,9 +9,9 @@ each slice in isolation.
   plan (`03-plan.md`). Interactive. `plan_lint.py` runs the plan-time checks:
   - field validation (v2 card format below);
   - a shape report (fan-out ratio and longest dependency chain), with a WARN when the plan is
-    a pipeline rather than a parallel plan and does not declare `deliver: stacked`;
-  - an undeclared-test check: a backticked identifier in a card that appears in a test file
-    the card does not declare is reported as a WARN.
+    a pipeline rather than a parallel plan and does not declare `deliver: stacked`; the header
+    line `shape-ack: <reason>` records an accepted pipeline and silences the WARN;
+  - legacy `mode:` fields, reported once for the whole plan.
 
   It also ships `stack.py` for restacking slice branches, and the planning skill writes a
   review bundle when a fan-out opens more than 3 PRs.
@@ -24,6 +24,16 @@ each slice in isolation.
     `deletes-existing: yes — <what and why>`;
   - **tests** — every declared test file must change (`tests: none` is honored);
   - **size report** — code / tests / data-generated line counts. There is no size cap.
+
+## Single-card plans
+
+A change that changes no behavior something else relies on, crosses no external contract or
+schema, and ships in one PR skips Phase 1: no RFC, no audit document. Write a one-slice
+`03-plan.md` and hand it to `slice-executor`; the gates, the cold-start test, and the
+incidental-test rule still apply.
+`plan_lint.py` accepts a one-card plan, including `deletes-existing: yes` — the slice-1
+foundation rule only applies when there is a fan-out to protect. The plan is committed to the
+base branch and is never edited on the slice branch.
 
 ## Delivery shapes
 
