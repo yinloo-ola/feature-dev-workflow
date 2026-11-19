@@ -1337,6 +1337,7 @@ class DiscoverTest(unittest.TestCase):
             ("package.json without scripts.test", [("package.json", '{"scripts":{"build":"x"}}')],
              None, None),
             ("package.json without scripts", [("package.json", "{}")], None, None),
+            ("malformed package.json is ignored", [("package.json", "{not json")], None, None),
             ("go.mod", [("go.mod", "module m\n")], None, "go vet ./... && go test ./..."),
             ("Cargo.toml", [("Cargo.toml", "")], None, "cargo test"),
             ("pyproject.toml", [("pyproject.toml", "")], None, "python3 -m pytest -q"),
@@ -1362,6 +1363,14 @@ class DiscoverTest(unittest.TestCase):
                 for f, text in files:
                     (Path(d) / f).write_text(text)
                 self.assertEqual(stack.discover_test_cmd(Path(d), override), want)
+
+    def test_git_decodes_with_replacement(self):
+        fake = mock.Mock(returncode=0, stdout="ok\n")
+        with mock.patch("subprocess.run", return_value=fake) as run:
+            self.assertEqual(stack.git("status"), "ok")
+        kwargs = run.call_args.kwargs
+        self.assertEqual(kwargs.get("errors"), "replace")
+        self.assertEqual(kwargs.get("encoding"), "utf-8")
 
 
 class ParallelRestack(unittest.TestCase):

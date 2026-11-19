@@ -49,7 +49,8 @@ def run(*args, env=None):
 
 def git(*args):
     """Return stripped stdout, or None when git exits non-zero."""
-    r = subprocess.run(["git", *args], capture_output=True, text=True)
+    r = subprocess.run(["git", *args], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
     return r.stdout.strip() if r.returncode == 0 else None
 
 
@@ -390,9 +391,18 @@ def discover_test_cmd(root, override=None):
     if override:
         return override
     mk, pkg = root / "Makefile", root / "package.json"
-    if mk.is_file() and re.search(r"^test:", mk.read_text(), re.M):
+    try:
+        makefile = mk.read_text(errors="replace") if mk.is_file() else ""
+    except OSError:
+        makefile = ""
+    if re.search(r"^test:", makefile, re.M):
         return "make test"
-    if pkg.is_file() and "test" in json.loads(pkg.read_text()).get("scripts", {}):
+    try:
+        scripts = (json.loads(pkg.read_text(errors="replace")).get("scripts", {})
+                   if pkg.is_file() else {})
+    except (OSError, ValueError):  # ValueError covers JSONDecodeError
+        scripts = {}
+    if "test" in scripts:
         return "npm test"
     for marker, cmd in (("go.mod", "go vet ./... && go test ./..."), ("Cargo.toml", "cargo test")):
         if (root / marker).is_file():
