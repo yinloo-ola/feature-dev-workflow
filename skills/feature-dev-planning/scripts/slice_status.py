@@ -81,18 +81,28 @@ def resolve(pr, base, branch, claimed, states, deps):
 
 
 def detail(pr, claim, at, stale, waits, amended):
-    """The detail column: the PR, else the claim, else what a blocked slice waits on."""
+    """The detail column: the PR, else the claim, else what a blocked slice waits on.
+
+    Staleness and amendment are notes appended to that, never excluded by it: they are
+    facts about the claim directory, so a merged slice whose claim was never cleared
+    prints both `PR #<n>` and the rmdir that ends the leftover claim.
+    """
     if pr:
         out = f"PR #{pr['number']}"
     elif at:
         out = f"claimed at {at}"
-    elif claim.exists():
-        out = f"stale claim — clear with rmdir {claim}" if stale else "claimed, no worktree"
-    elif waits:
-        out = "waits on " + ", ".join(map(str, waits))
+    elif claim.exists() and not stale:
+        out = "claimed, no worktree"
     else:
         out = ""
-    return out + ("; amended since claim" if amended else "")
+    notes = []
+    if stale:  # the claim is the lie; nothing else about this row is as actionable
+        notes.append(f"stale claim — clear with rmdir {claim}")
+    elif not out and waits:
+        notes.append("waits on " + ", ".join(map(str, waits)))
+    if amended:
+        notes.append("amended since claim")
+    return "; ".join(([out] if out else []) + notes)
 
 
 def summary(rows):
@@ -137,8 +147,11 @@ def cmd_status(plan, no_pr):
         state = resolve(pr, base, branch, claim.exists() or at, states, deps)
         states[n] = state
         waits = [d for d in deps if states.get(d) != "merged"]
-        stale = (claim.exists() and not has_branch and not at
-                 and not (pr and pr["state"] in ("OPEN", "MERGED")))
+        # Stale is purely local: a claim dir with nothing under it any more. PR state is
+        # NOT a qualifier — a merged (or in-review) slice whose claim was never cleared is
+        # exactly the case this detail exists to surface. The PR is already the `state`
+        # column's job, so it must not suppress the cleanup hint or the summary count.
+        stale = claim.exists() and not has_branch and not at
         amended = (cards[n]["amended"] and claim.exists()
                    and claim.stat().st_mtime < plan_mtime)
         rows.append({"n": n, "state": state, "stale": stale, "waits": waits,

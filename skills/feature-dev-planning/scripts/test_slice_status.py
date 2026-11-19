@@ -228,8 +228,10 @@ class PrState(StatusCase):
 
 
 class Claims(StatusCase):
-    # B6
-    def test_b6_claim_without_branch_is_stale_and_is_not_removed(self):
+    # B6 — a stale claim is a purely local fact (claim dir, no branch, no worktree). It is
+    # reported and counted whatever the slice's PR says, because the PR is the `state`
+    # column's job and the leftover directory is the detail column's.
+    def test_b6_local_claim_without_branch_is_stale_and_is_not_removed(self):
         claim = self.repo.claim(3)
         code, out, err = self.run_status()
         self.assertEqual(code, 0, err)
@@ -237,6 +239,43 @@ class Claims(StatusCase):
         self.assertEqual(rows["3"],
                          line(3, "in flight", f"stale claim — clear with rmdir {claim}"))
         self.assertTrue(claim.is_dir())  # read-only: the operator clears it, not us
+        self.assertIn("stale claims: 1", out.splitlines()[-1])
+
+    def test_b6_merged_pr_with_a_leftover_claim_is_still_stale(self):
+        """The real case: .specs/slice-execution-v2/claims/slice-1 survives PR #1 merging."""
+        self.repo.git("branch", "-D", "slice/feat-1")  # merged and cleaned up
+        claim = self.repo.claim(1)
+        self.gh_prs({"slice/feat-1": {"number": 1, "state": "MERGED"}})
+        code, out, err = self.run_status()
+        self.assertEqual(code, 0, err)
+        rows = self.rows(out)
+        self.assertEqual(rows["1"], line(1, "merged", f"PR #1; stale claim — clear with rmdir {claim}"))
+        self.assertTrue(claim.is_dir())
+        summary = out.splitlines()[-1]
+        self.assertIn("stale claims: 1", summary)
+        self.assertNotIn("in flight", summary)  # merged outranks the claim, as ever
+
+    def test_b6_merged_and_local_stale_claims_are_both_counted(self):
+        self.repo.git("branch", "-D", "slice/feat-1")
+        merged, local = self.repo.claim(1), self.repo.claim(3)
+        self.gh_prs({"slice/feat-1": {"number": 1, "state": "MERGED"}})
+        code, out, err = self.run_status()
+        self.assertEqual(code, 0, err)
+        rows = self.rows(out)
+        self.assertEqual(rows["1"], line(1, "merged", f"PR #1; stale claim — clear with rmdir {merged}"))
+        self.assertEqual(rows["3"],
+                         line(3, "in flight", f"stale claim — clear with rmdir {local}"))
+        self.assertIn("stale claims: 2", out.splitlines()[-1])
+
+    def test_stale_claim_survives_an_open_pr_too(self):
+        # PR state never suppresses the cleanup hint: merged is not a special exception.
+        self.repo.git("branch", "-D", "slice/feat-2")
+        claim = self.repo.claim(2)
+        self.gh_prs({"slice/feat-2": {"number": 7, "state": "OPEN"}})
+        code, out, err = self.run_status()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.rows(out)["2"],
+                         line(2, "in review", f"PR #7; stale claim — clear with rmdir {claim}"))
         self.assertIn("stale claims: 1", out.splitlines()[-1])
 
     # B7
@@ -255,13 +294,28 @@ class Claims(StatusCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.rows(out)["2"], line(2, "in flight", "claimed, no worktree"))
 
-    def test_claim_is_not_reported_stale_while_the_slice_has_an_open_pr(self):
-        self.repo.git("branch", "-D", "slice/feat-2")
-        self.repo.claim(2)
-        self.gh_prs({"slice/feat-2": {"number": 7, "state": "OPEN"}})
+    def test_staleness_never_changes_the_state_column(self):
+        """PR state qualifies the row's `state`, never the claim's staleness.
+
+        Slices 1, 2 and 3 each lose whatever branch they had and keep a claim dir, so all
+        three are stale. Their states stay whatever the six-row table says — merged, in
+        review, in flight — and the count is 3, not 0.
+        """
+        for n in (1, 2):  # the only slices setUp gives a branch
+            self.repo.git("branch", "-D", f"slice/feat-{n}")
+        for n in (1, 2, 3):
+            self.repo.claim(n)
+        self.gh_prs({"slice/feat-1": {"number": 11, "state": "MERGED"},
+                     "slice/feat-2": {"number": 7, "state": "OPEN"}})
         code, out, err = self.run_status()
         self.assertEqual(code, 0, err)
-        self.assertNotIn("stale claims", out.splitlines()[-1])
+        rows = self.rows(out)
+        self.assertTrue(rows["1"].startswith(line(1, "merged")), rows["1"])
+        self.assertTrue(rows["2"].startswith(line(2, "in review")), rows["2"])
+        self.assertTrue(rows["3"].startswith(line(3, "in flight")), rows["3"])
+        for n in (1, 2, 3):
+            self.assertIn("stale claim — clear with rmdir", rows[str(n)], rows[str(n)])
+        self.assertIn("stale claims: 3", out.splitlines()[-1])
 
 
 class ReadOnly(StatusCase):
