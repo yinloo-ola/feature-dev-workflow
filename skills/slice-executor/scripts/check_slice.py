@@ -18,7 +18,9 @@ Modes:
 
 Exit 0 = pass, 1 = fail (reasons printed).
 """
+import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -51,6 +53,24 @@ def git(*args):
     r = subprocess.run(["git", *args], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     return r.returncode, r.stdout.strip()
+
+
+def pr_is_merged(branch):
+    """True only when gh reports the branch's pull request as MERGED.
+    A missing gh, a gh failure, an unparseable payload, or any other state is False —
+    this must never turn an unverified dependency into a pass."""
+    try:
+        r = subprocess.run(["gh", "pr", "view", branch, "--json", "state"],
+                           capture_output=True, text=True)
+    except OSError:  # no gh binary after all
+        return False
+    if r.returncode != 0:
+        return False
+    try:
+        payload = json.loads(r.stdout)
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("state") == "MERGED"
 
 
 def parse_plan(path):
@@ -141,6 +161,18 @@ def cmd_ready(plan_path, n):
         rc, _ = git("merge-base", "--is-ancestor", branch, base)
         if rc != 0:
             rc2, _ = git("rev-parse", "--verify", branch)
+            # An absent branch was most likely merged and cleaned up, so gh's PR state is the
+            # only merge record left. Only that path consults gh; an existing branch that is
+            # not an ancestor of base is unmerged and keeps its failure below unchanged. The
+            # rc2 tests are re-stated (not nested) so those existing lines stay byte-identical:
+            # the card declares deletes-existing: no, and the deletions gate enforces it.
+            gh = shutil.which("gh") if rc2 != 0 else None
+            if rc2 != 0 and gh is not None and pr_is_merged(branch):
+                continue
+            if rc2 != 0 and gh is None:  # merge record unreadable: name the installable fix
+                blocked.append(f"slice {dep}: branch {branch} not found "
+                               "(if merged and deleted, install gh or confirm with the orchestrator)")
+                continue
             if rc2 != 0:
                 blocked.append(f"slice {dep}: branch {branch} not found "
                                "(if merged and deleted, confirm with the orchestrator)")
@@ -251,4 +283,7 @@ if __name__ == "__main__":
         print("usage: check_slice.py ready|verify <plan.md> <slice-number>", file=sys.stderr)
         sys.exit(1)
     mode, plan, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+    if not Path(plan).is_file():  # both modes: a gitignored .specs/ is absent from worktrees
+        print(f"error: {plan} not found", file=sys.stderr)
+        sys.exit(1)
     (cmd_ready if mode == "ready" else cmd_verify)(plan, n)
