@@ -29,6 +29,7 @@ from pathlib import Path
 
 SLICE_RE = re.compile(r"^### Slice (\d+):")
 DEPS_RE = re.compile(r"^\[([^\]]*)\]$")  # same grammar as plan_lint/check_slice
+DELIVER_RE = re.compile(r"^deliver:\s*(parallel|stacked)$")  # same grammar as plan_lint
 MUTATING = ("restack", "continue", "abort", "push")
 RESUMING = ("continue", "abort")  # run mid-conflict: tree is dirty, a rebase is open
 MARKER_RE = re.compile(r"^(<{7}|>{7})( |$)")  # a lone ======= is a setext heading, not a marker
@@ -53,13 +54,22 @@ def git(*args):
 
 
 def parse_plan(path):
-    """Return (base_branch, feature, order) — order is the linearized stack."""
+    """Return (base_branch, feature, order, deliver) — order is the linearized stack."""
     text = Path(path).read_text()
     base = re.search(r"^Base branch:\s*(\S+)", text, re.M)
     if not base:
         die(f"{path}: missing 'Base branch:' header — add it to the plan")
     m = re.search(r"^# Plan:\s*(\S+)", text, re.M)
     feature = m.group(1) if m else Path(path).resolve().parent.name
+    deliver = "parallel"
+    for line in text.splitlines():
+        if line.startswith("deliver:"):
+            m = DELIVER_RE.match(line.rstrip())
+            if not m:
+                die(f"{path}: deliver must be parallel or stacked, got "
+                    f"{line[len('deliver:'):].strip()!r}")
+            deliver = m.group(1)
+            break
     deps, cur = {}, None
     for line in text.splitlines():
         m = SLICE_RE.match(line)
@@ -81,10 +91,10 @@ def parse_plan(path):
                 "existing slices; fix the plan (plan_lint.py reports this)")
     # Every edge points backward, so ascending slice number IS the topological
     # order with a numeric tiebreak — no graph walk needed.
-    return base.group(1), feature, sorted(deps)
+    return base.group(1), feature, sorted(deps), deliver
 
 
-def capture(plan, base, feature, order, start):
+def capture(plan, base, feature, order, deliver, start):
     """Snapshot the stack: the record continue/abort/push work from."""
     def sha(ref):
         return git("rev-parse", "--verify", "-q", ref)
@@ -92,6 +102,7 @@ def capture(plan, base, feature, order, start):
         "plan_path": str(Path(plan).resolve()),
         "feature": feature,
         "base": base,
+        "deliver": deliver,
         "order": order,
         "branches": {str(n): {
             "orig_sha": sha(f"refs/heads/slice/{feature}-{n}"),
@@ -226,12 +237,12 @@ def pr_info(branch, parent):
     return out
 
 
-def cmd_status(plan, base, feature, order):
+def cmd_status(plan, base, feature, order, deliver):
     gh = shutil.which("gh")
     print(f"stack {feature} on {base}: " + " -> ".join(map(str, order)))
     if not gh:
         print("gh absent — order from plan only")
-    snap, parent = capture(plan, base, feature, order, order[0])["branches"], base
+    snap, parent = capture(plan, base, feature, order, deliver, order[0])["branches"], base
     for n in order:
         branch = f"slice/{feature}-{n}"
         local, remote = snap[str(n)]["orig_sha"], snap[str(n)]["remote_sha"]
@@ -311,14 +322,13 @@ def plan_lines(cmd, state, feature, start, restack_from=None):
 
     restack_from: push --from n on a fresh state; the restack is not simulated.
     """
-    order, base, shas = state["order"], state["base"], state["branches"]
+    order, shas = state["order"], state["branches"]
     todo = order[order.index(start):] if cmd == "restack" else order
     lines = []
     prs = {}
     for n in todo:
         branch, s = f"slice/{feature}-{n}", shas[str(n)]
-        i = order.index(n)
-        parent = f"slice/{feature}-{order[i - 1]}" if i else base
+        parent = parent_of(state, feature, n)[0]
         if cmd == "restack":
             base_old = f" (base_old {(fork_base(parent, branch) or '?')[:7]})" if s["orig_sha"] else ""
             lines.append(f"rebase {branch} onto {parent}" + base_old)
@@ -354,16 +364,25 @@ def save(sfile, state):
 
 
 def parent_of(state, feature, n):
-    """(parent ref, old parent tip) for slice n: nearest earlier existing branch, else base.
+    """(parent ref, old parent tip) for slice n.
 
-    The old tip is the commit n was built on (base_old, recorded at replay) once known.
+    stacked: nearest earlier existing branch, else base (a linear stack).
+    parallel: always the plan base — each slice replays onto the updated base,
+    never onto a sibling.
     """
     order, shas = state["order"], state["branches"]
+    orig = shas[str(n)]["orig_sha"]
+    base_old = shas[str(n)].get("base_old")
+
+    def fork():  # where n was built: unknown while n has no branch (a dry-run may ask)
+        return base_old or (git("merge-base", state["base"], orig) if orig else None)
+
+    if state.get("deliver", "stacked") != "stacked":
+        return state["base"], fork()
     for m in reversed(order[:order.index(n)]):
         if shas[str(m)]["orig_sha"]:
-            return f"slice/{feature}-{m}", shas[str(n)].get("base_old") or shas[str(m)]["orig_sha"]
-    return state["base"], shas[str(n)].get("base_old") or git(
-        "merge-base", state["base"], shas[str(n)]["orig_sha"])
+            return f"slice/{feature}-{m}", base_old or shas[str(m)]["orig_sha"]
+    return state["base"], fork()
 
 
 def discover_test_cmd(root, override=None):
@@ -672,12 +691,12 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if not Path(args.plan).is_file():
         die(f"{args.plan} not found — pass the path to 03-plan.md")
-    base, feature, order = parse_plan(args.plan)
+    base, feature, order, deliver = parse_plan(args.plan)
     gitdir = git("rev-parse", "--absolute-git-dir")
     if not gitdir:
         die("not inside a git repository — cd into the repo checkout, then re-run")
     if args.cmd == "status":  # read-only, so --dry-run changes nothing
-        cmd_status(args.plan, base, feature, order)
+        cmd_status(args.plan, base, feature, order, deliver)
         return 0
     start = getattr(args, "start", None)
     if start is None:
@@ -695,7 +714,7 @@ def main(argv=None):
     # An existing state file holds the original SHAs abort restores: never overwrite.
     fresh = not sfile.exists()
     if fresh:
-        state = capture(args.plan, base, feature, order, start)
+        state = capture(args.plan, base, feature, order, deliver, start)
         refuse_diverged(state, feature)
     else:
         state = load_state(sfile, feature)

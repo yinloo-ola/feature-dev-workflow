@@ -17,6 +17,7 @@ import stack  # noqa: E402
 PLAN = """# Plan: feat
 
 Base branch: main
+deliver: stacked
 
 ### Slice 1: one
 - depends-on: []
@@ -130,6 +131,7 @@ class StackTest(unittest.TestCase):
             "plan_path": str(self.plan),
             "feature": "feat",
             "base": "main",
+            "deliver": "stacked",
             "order": [1, 2, 3],
             "branches": {
                 "1": {"orig_sha": self.sha[1], "remote_sha": self.sha[1]},
@@ -216,6 +218,7 @@ class StackTest(unittest.TestCase):
 CHAIN = """# Plan: feat
 
 Base branch: main
+deliver: stacked
 
 ### Slice 1: one
 - depends-on: []
@@ -1359,6 +1362,79 @@ class DiscoverTest(unittest.TestCase):
                 for f, text in files:
                     (Path(d) / f).write_text(text)
                 self.assertEqual(stack.discover_test_cmd(Path(d), override), want)
+
+
+class ParallelRestack(unittest.TestCase):
+    """deliver: parallel — every slice replays onto the plan base, never a sibling."""
+
+    PLAN = """# Plan: feat
+
+Base branch: main
+deliver: parallel
+
+### Slice 1: one
+- depends-on: []
+
+### Slice 2: two
+- depends-on: []
+
+### Slice 3: three
+- depends-on: []
+"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        self.plan = root / "03-plan.md"
+        self.plan.write_text(self.PLAN)
+        repo = root / "repo"
+        repo.mkdir()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(repo)
+        g("init", "-q", "-b", "main")
+        Path("f.txt").write_text("x\n")
+        g("add", "f.txt")
+        g("commit", "-q", "-m", "base")
+        for n in (1, 2, 3):
+            g("switch", "-q", "-c", f"slice/feat-{n}", "main")
+            g("commit", "-q", "--allow-empty", "-m", f"slice {n}")
+        g("switch", "-q", "main")
+        g("commit", "-q", "--allow-empty", "-m", "base moves")
+        self.state = repo / ".git" / "stack-state.json"
+        patcher = mock.patch("stack.shutil.which", return_value=None)  # gh absent
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_stack(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch("sys.stdin", io.StringIO()):
+            try:
+                code = stack.main([*argv[:1], str(self.plan), *argv[1:]])
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_dry_run_parents_each_slice_to_the_base(self):
+        code, out, _ = self.run_stack("restack", "--dry-run", "--from", "2")
+        self.assertEqual(code, 0)
+        self.assertIn("rebase slice/feat-2 onto main", out)
+        self.assertIn("rebase slice/feat-3 onto main", out)
+        self.assertNotIn("onto slice/feat-1", out)
+        self.assertNotIn("onto slice/feat-2", out)
+
+    def test_restack_replays_each_slice_onto_the_updated_base(self):
+        code, _, err = self.run_stack("restack", "--from", "1")
+        self.assertEqual(code, 0, err)
+        for n in (1, 2, 3):
+            r = subprocess.run(["git", "merge-base", "--is-ancestor",
+                                "main", f"slice/feat-{n}"])
+            self.assertEqual(r.returncode, 0, f"slice/feat-{n} lacks the updated base")
+        for a, b in ((1, 2), (1, 3), (2, 3)):
+            r = subprocess.run(["git", "merge-base", "--is-ancestor",
+                                f"slice/feat-{a}", f"slice/feat-{b}"])
+            self.assertNotEqual(r.returncode, 0, f"slice/feat-{b} wrongly contains slice/feat-{a}")
 
 
 if __name__ == "__main__":
