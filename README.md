@@ -124,14 +124,27 @@ Symlinks each skill from `skills/` into `~/.agents/skills/`, so edits in this re
 for the symlinked entries. `install.sh` skips (with a message) any entry that exists and is
 not a symlink; remove that directory first and re-run.
 
-## Tests
+## Development
+
+Requires Python 3.9+ (the scripts are stdlib-only); `git` is required, `gh` is optional
+(PR state in `stack.py status` and `push`).
+
+Run every suite:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s skills/feature-dev-planning/scripts -p "test_*.py"
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s skills/slice-executor/scripts -p "test_*.py"
+make test
 ```
 
-Requires python3 and git; `gh` is optional (PR state in `stack.py status` and `push`).
+Or run one suite directly:
+
+```bash
+cd skills/feature-dev-planning/scripts && python3 -m unittest -v test_plan_lint
+cd skills/feature-dev-planning/scripts && python3 -m unittest -v test_stack
+cd skills/slice-executor/scripts     && python3 -m unittest -v test_check_slice
+```
+
+`test_stack` builds temporary git repositories and takes ~45s; the other two suites
+take a few seconds each.
 
 ## Layout
 

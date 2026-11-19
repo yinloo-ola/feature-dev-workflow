@@ -1337,3 +1337,7 @@ class DiscoverTest(unittest.TestCase):
                 for f, text in files:
                     (Path(d) / f).write_text(text)
                 self.assertEqual(stack.discover_test_cmd(Path(d), override), want)
+
+
+if __name__ == "__main__":
+    unittest.main()
